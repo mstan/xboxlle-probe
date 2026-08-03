@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile host client
+        run: python -m py_compile host/xbox_probe.py
+      - name: Run mock-agent tests
+        run: python -m unittest discover -s tests -v
+
+  xbe-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install nxdk build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison clang cmake flex lld llvm make
+      - name: Clone pinned nxdk
+        shell: bash
+        run: |
+          NXDK_COMMIT="$(tr -d '\r\n' < .nxdk-version)"
+          git clone --filter=blob:none https://github.com/XboxDev/nxdk.git "$RUNNER_TEMP/nxdk"
+          git -C "$RUNNER_TEMP/nxdk" checkout "$NXDK_COMMIT"
+          git -C "$RUNNER_TEMP/nxdk" submodule update --init --recursive --depth 1
+      - name: Build XBE
+        shell: bash
+        run: |
+          export NXDK_DIR="$RUNNER_TEMP/nxdk"
+          eval "$("$NXDK_DIR/bin/activate" -s)"
+          make -j2
+      - name: Confirm artifact
+        run: test -s bin/default.xbe

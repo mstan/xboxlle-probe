@@ -1,0 +1,32 @@
+# nxdk build output
+bin/
+*.xbe
+*.iso
+*.xiso
+*.exe
+*.obj
+*.lib
+*.d
+
+# Probe payloads, dumps, and results may contain dangerous, copyrighted, or private bytes
+*.bin
+*.raw
+*.img
+*.rom
+*.jsonl
+dumps/
+results/
+payloads/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
