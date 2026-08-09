@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import socketserver
 import threading
@@ -27,6 +28,17 @@ class MockAgentHandler(socketserver.StreamRequestHandler):
 
             if line == "PING":
                 self.wfile.write(b"PONG xboxlle-probe test\n")
+                return
+            if line == "PROBE CONTROLLER_S_HUB":
+                self.wfile.write(
+                    b'{"probe":"controller_s_hub","agent":"xboxlle-probe test",'
+                    b'"available":false,"hardware_inspected":false,'
+                    b'"usb_traffic":false,"reason":"agent_usb_stack_not_initialized",'
+                    b'"device_descriptor":null,"configuration_descriptor":null,'
+                    b'"hub_class_descriptor":null,"hub_status":null,'
+                    b'"downstream_port_1_status":null,'
+                    b'"downstream_port_1_enumeration":null}\n'
+                )
                 return
             if line == "ARM I_ACCEPT_THE_RISK":
                 if self.server.allow_arm:  # type: ignore[attr-defined]
@@ -113,6 +125,25 @@ class AgentClientTests(unittest.TestCase):
         with self.assertRaisesRegex(xbox_probe.ProbeError, "single line"):
             self.client.request("PING\nEXEC 1")
 
+    def test_controller_s_hub_probe_is_fixed_and_unarmed(self) -> None:
+        reply = self.client.request("PROBE CONTROLLER_S_HUB")
+        sentinel = json.loads(reply)
+        self.assertEqual(sentinel["probe"], "controller_s_hub")
+        self.assertFalse(sentinel["available"])
+        self.assertFalse(sentinel["hardware_inspected"])
+        self.assertFalse(sentinel["usb_traffic"])
+        self.assertEqual(sentinel["reason"], "agent_usb_stack_not_initialized")
+        for field in (
+            "device_descriptor",
+            "configuration_descriptor",
+            "hub_class_descriptor",
+            "hub_status",
+            "downstream_port_1_status",
+            "downstream_port_1_enumeration",
+        ):
+            self.assertIsNone(sentinel[field])
+        self.assertEqual(self.server.commands, ["PROBE CONTROLLER_S_HUB"])
+
 
 class CliSafetyTests(unittest.TestCase):
     def test_host_has_no_builtin_default(self) -> None:
@@ -141,6 +172,29 @@ class CliSafetyTests(unittest.TestCase):
     def test_parse_integer_accepts_decimal_and_hex(self) -> None:
         self.assertEqual(xbox_probe.parse_integer("32"), 32)
         self.assertEqual(xbox_probe.parse_integer("0x20"), 32)
+
+    def test_controller_s_hub_probe_cli_name_maps_to_fixed_wire_name(self) -> None:
+        args = xbox_probe.build_parser().parse_args(
+            ["--host", "127.0.0.1", "probe", "controller-s-hub"]
+        )
+        commands: list[str] = []
+
+        class FixedProbeClient:
+            def __init__(self, *unused_args: object, **unused_kwargs: object) -> None:
+                pass
+
+            def request(self, command: str) -> str:
+                commands.append(command)
+                return ('{"probe":"controller_s_hub","available":false,'
+                        '"hardware_inspected":false,"usb_traffic":false}')
+
+        original_client = xbox_probe.AgentClient
+        xbox_probe.AgentClient = FixedProbeClient
+        try:
+            xbox_probe.run(args)
+        finally:
+            xbox_probe.AgentClient = original_client
+        self.assertEqual(commands, ["PROBE CONTROLLER_S_HUB"])
 
 
 if __name__ == "__main__":

@@ -215,7 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="show SAFE/ARMED session state")
 
     probe = commands.add_parser("probe", help="run a fixed read-only probe")
-    probe.add_argument("name", choices=("cpu", "nv2a"))
+    probe.add_argument("name", choices=("cpu", "nv2a", "controller-s-hub"))
 
     read = commands.add_parser("read", help="DANGEROUS: guarded raw memory/MMIO read")
     read.add_argument("address", type=parse_integer)
@@ -279,7 +279,9 @@ def run(args: argparse.Namespace) -> None:
     elif args.command == "status":
         print(client.request("STATUS"))
     elif args.command == "probe":
-        _print_json_reply(client.request(f"PROBE {args.name.upper()}"))
+        _print_json_reply(client.request(
+            f"PROBE {args.name.upper().replace('-', '_')}"
+        ))
     elif args.command == "read":
         _require_risk(args, "read")
         if args.length <= 0 or args.length > MAX_READ:

@@ -12,11 +12,12 @@ without a `0x` prefix.
 
 | Command | Reply | Meaning |
 |---|---|---|
-| `PING` | `PONG xboxlle-probe v0.3.0` | Liveness and version |
+| `PING` | `PONG xboxlle-probe v0.3.1` | Liveness and version |
 | `INFO` | one JSON line | Agent, kernel, tick count, port, armed state |
 | `STATUS` | `SAFE` or `ARMED` | Current session state |
 | `PROBE CPU` | one JSON line | CPUID vendor, signature, and feature words |
 | `PROBE NV2A` | one JSON line | Fixed, previously tested NV2A register reads |
+| `PROBE CONTROLLER_S_HUB` | one JSON line | Fixed capability sentinel; current version does not inspect Controller S hardware |
 | `QUIT` | connection closes | Stop this client session |
 
 ## Session arming
@@ -34,6 +35,21 @@ ARMED
 ```
 
 Arming lasts only for the current TCP connection. A new connection begins in `SAFE` state.
+
+## Controller S hub capability sentinel
+
+`PROBE CONTROLLER_S_HUB` is a fixed capability sentinel, not a hardware
+inspection. The current agent's USB stack is not initialized. Its reply has
+`available:false`, `hardware_inspected:false`, `usb_traffic:false`, and reason
+`agent_usb_stack_not_initialized`; every descriptor, status, and enumeration
+field is JSON `null`.
+
+The command sends no USB control transfer, performs no OHCI access, and cannot
+satisfy the Controller S descriptor-capture Bead. It does not infer a generic
+hub identity or fabricate descriptor bytes. A future evidence capture requires
+a separately reviewed and explicitly authorized active USB
+initialization/enumeration design; it must omit string/serial and other
+console-unique data.
 
 ## Armed commands
 

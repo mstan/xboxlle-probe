@@ -22,7 +22,7 @@
 extern struct netif *g_pnetif;
 
 #define AGENT_PORT 4380
-#define AGENT_VER "xboxlle-probe v0.3.0"
+#define AGENT_VER "xboxlle-probe v0.3.1"
 #define MAX_RW 4096
 #define MAX_BULK (1u << 20)
 
@@ -179,6 +179,24 @@ static void probe_nv2a(int fd, char *reply, size_t reply_size) {
     send_str(fd, reply);
 }
 
+// This is a capability sentinel, not a Controller S evidence probe.  The
+// agent's USB stack is not initialized, so it must not inspect a device list,
+// issue a USB transfer, access OHCI, or infer hub/descriptors from any other
+// source.  It exists so callers can distinguish this unsupported capability
+// from an empty or guessed hardware capture.
+static void probe_controller_s_hub(int fd, char *reply, size_t reply_size) {
+    snprintf(reply, reply_size,
+             "{\"probe\":\"controller_s_hub\",\"agent\":\"%s\","
+             "\"available\":false,\"hardware_inspected\":false,"
+             "\"usb_traffic\":false,\"reason\":\"agent_usb_stack_not_initialized\","
+             "\"device_descriptor\":null,\"configuration_descriptor\":null,"
+             "\"hub_class_descriptor\":null,\"hub_status\":null,"
+             "\"downstream_port_1_status\":null,"
+             "\"downstream_port_1_enumeration\":null}\n",
+             AGENT_VER);
+    send_str(fd, reply);
+}
+
 static void handle_client(int fd) {
     static char line[MAX_RW * 2 + 64];
     static uint8_t rw[MAX_RW];
@@ -208,6 +226,8 @@ static void handle_client(int fd) {
             probe_cpu(fd, reply, sizeof(reply));
         } else if (!strcmp(line, "PROBE NV2A")) {
             probe_nv2a(fd, reply, sizeof(reply));
+        } else if (!strcmp(line, "PROBE CONTROLLER_S_HUB")) {
+            probe_controller_s_hub(fd, reply, sizeof(reply));
         } else if (!strncmp(line, "RB ", 3)) {
             uint32_t address = 0, len = 0;
             if (!armed) {

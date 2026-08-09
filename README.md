@@ -25,6 +25,8 @@ The Xbox runs `xboxlle-probe.xbe`, which listens on TCP port 4380. The host clie
 
 - identify the running agent and Xbox kernel;
 - run named, read-only CPU and NV2A probes with JSON output;
+- query the Controller S hub capability sentinel, which currently does not
+  inspect USB hardware or provide descriptor evidence;
 - read guarded RAM, NV2A/MCPX MMIO, and selected flash ranges;
 - bulk-read a permitted range to a host file;
 - in explicitly armed unsafe mode, write RAM/MMIO or execute an uploaded x86 payload;
@@ -42,7 +44,8 @@ This project reduces accidental misuse; it does not make low-level hardware acce
   session sends the exact arming phrase.
 - The host client requires `--i-accept-the-risk` before dangerous operations.
 - Direct reads and writes are range-checked. Flash writes are never accepted by `WRITE`.
-- Named probes use a small set of fixed registers that were tested on one Xbox v1.1.
+- Named hardware probes use a small set of fixed registers tested on one Xbox v1.1;
+  the Controller S hub command is instead a no-inspection capability sentinel.
 
 Those measures are guardrails, not a security boundary. `EXEC` deliberately runs arbitrary
 x86 machine code, which can bypass every range check and access storage or flash. Read-only
@@ -131,12 +134,19 @@ Run the fixed read-only probes:
 ```sh
 python host/xbox_probe.py probe cpu
 python host/xbox_probe.py probe nv2a
+python host/xbox_probe.py probe controller-s-hub
 ```
+
+`controller-s-hub` is currently only a capability sentinel. Its JSON reply
+sets `available`, `hardware_inspected`, and `usb_traffic` to `false`, with null
+descriptor/status/transcript fields and reason `agent_usb_stack_not_initialized`.
+It cannot satisfy a Controller S descriptor-capture request and does not touch
+USB/OHCI hardware.
 
 Example CPU result:
 
 ```json
-{"probe":"cpu","agent":"xboxlle-probe v0.3.0","vendor":"GenuineIntel","max_leaf":2,"signature":"0x0000068a","features_edx":"0x0383f9ff","features_ecx":"0x00000000"}
+{"probe":"cpu","agent":"xboxlle-probe v0.3.1","vendor":"GenuineIntel","max_leaf":2,"signature":"0x0000068a","features_edx":"0x0383f9ff","features_ecx":"0x00000000"}
 ```
 
 Guarded raw read (still dangerous—v0.1 froze real hardware on a bad read):
