@@ -150,6 +150,58 @@ def _print_json_reply(reply: str) -> None:
     print(json.dumps(parsed, sort_keys=True, separators=(",", ":")))
 
 
+def _av_handshake_reply(reply: str) -> None:
+    """Retain observations, but never turn an incomplete probe into success."""
+    if reply.startswith("ERR"):
+        raise ProbeError(reply)
+    try:
+        data = json.loads(reply)
+    except json.JSONDecodeError as exc:
+        raise ProbeError("malformed AV observation JSON") from exc
+    outcomes = {
+        "counter_invalid", "counter_backwards", "initial_not_idle", "initial_changed",
+        "unexpected_bits", "trace_limit", "request_not_observed", "time_limit",
+        "read_limit", "ack_observed",
+    }
+    if (not isinstance(data, dict) or data.get("probe") != "av_handshake"
+            or type(data.get("schema")) is not int or data["schema"] != 1
+            or data.get("address") != "0xfd6806a0"
+            or not isinstance(data.get("outcome"), str) or data["outcome"] not in outcomes):
+        raise ProbeError("unexpected AV observation schema/address/outcome")
+    for name, maximum in (("frequency", (1 << 64) - 1), ("reads", 100002),
+                          ("writes", 1), ("request", 1)):
+        value = data.get(name)
+        if type(value) is not int or not 0 <= value <= maximum:
+            raise ProbeError(f"invalid AV observation {name}")
+    trace = data.get("trace")
+    if not isinstance(trace, list) or len(trace) > 8:
+        raise ProbeError("invalid AV observation trace")
+    write_ticks = data.get("write_ticks")
+    if (not isinstance(write_ticks, list) or len(write_ticks) != 2
+            or any(type(v) is not int for v in write_ticks)
+            or not 0 <= write_ticks[0] <= write_ticks[1] < (1 << 64)):
+        raise ProbeError("invalid AV write interval")
+    previous = 0
+    for sample in trace + [data.get("last")]:
+        if (not isinstance(sample, list) or len(sample) != 3
+                or any(type(v) is not int for v in sample)
+                or not previous <= sample[0] <= sample[1] < (1 << 64)
+                or not 0 <= sample[2] <= 0xffffffff):
+            raise ProbeError("invalid AV observation sample")
+        previous = sample[0]
+    if data["outcome"] == "ack_observed":
+        if (not 0 < data["frequency"] <= 0xffffffff or data["writes"] != 1
+                or data["reads"] < 3 or not trace or trace[0][2] not in (0, 0x11)
+                or data["request"] != ((~trace[0][2]) & 1)
+                or data["last"][2] != data["request"] * 0x11
+                or data["last"][0] < write_ticks[1]
+                or data["last"][1] - write_ticks[0] >= (data["frequency"] + 19) // 20):
+            raise ProbeError("AV acknowledgment claim contradicts observations")
+    print(json.dumps(data, sort_keys=True, separators=(",", ":")))
+    if data["outcome"] != "ack_observed":
+        raise ProbeError(f"AV observation stopped: {data['outcome']}; inspect console, do not retry")
+
+
 def _ftp_password(args: argparse.Namespace) -> str:
     password = args.ftp_password or os.environ.get("XBOX_PROBE_FTP_PASSWORD")
     if password:
@@ -217,6 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     probe = commands.add_parser("probe", help="run a fixed read-only probe")
     probe.add_argument("name", choices=("cpu", "nv2a", "controller-s-hub"))
 
+    commands.add_parser("av-handshake", help="DANGEROUS: one AV request toggle and bounded observation")
+
     read = commands.add_parser("read", help="DANGEROUS: guarded raw memory/MMIO read")
     read.add_argument("address", type=parse_integer)
     read.add_argument("length", type=int)
@@ -282,6 +336,9 @@ def run(args: argparse.Namespace) -> None:
         _print_json_reply(client.request(
             f"PROBE {args.name.upper().replace('-', '_')}"
         ))
+    elif args.command == "av-handshake":
+        _require_risk(args, "av-handshake")
+        _av_handshake_reply(client.request("AV_HANDSHAKE", dangerous=True))
     elif args.command == "read":
         _require_risk(args, "read")
         if args.length <= 0 or args.length > MAX_READ:

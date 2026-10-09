@@ -35,6 +35,10 @@ The Xbox runs `xboxlle-probe.xbe`, which listens on TCP port 4380. The host clie
 The named probes are the intended interface for humans and AI agents. Raw memory operations
 exist for hardware research, but they are sharp tools.
 
+The separate armed [`av-handshake` experiment](docs/AV-HANDSHAKE.md) performs
+one fixed NV2A request write and bounded observations. It requires explicit
+current-task authorization and is not included among the read-only probes.
+
 ## Safety model
 
 This project reduces accidental misuse; it does not make low-level hardware access safe.

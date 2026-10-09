@@ -61,12 +61,46 @@ console-unique data.
 | `EXEC <len>\n<raw>` | `RET <hex>` | Copy and call raw x86 code as `int(void)` |
 | `L <Xbox path>` | `LAUNCHING`, then connection ends on success | Launch an XBE |
 | `DASH` | `RETURNING`, then connection ends | Launch the configured dashboard path |
+| `AV_HANDSHAKE` | one observation JSON line, then connection closes | One fixed FD6806A0 request toggle and bounded sampling; at most one attempt per agent lifetime |
 
 Without arming, these return:
 
 ```text
 ERR not armed
 ```
+
+### Fixed AV handshake experiment (schema 1, agent v0.4.0)
+
+`AV_HANDSHAKE` is an armed experiment, **not** a read-only `PROBE` command.
+Its exact operation, evidence limits and review procedure are in
+[AV-HANDSHAKE.md](AV-HANDSHAKE.md). It is rejected before any callback if
+unarmed. The first armed attempt consumes a process-wide latch even if it
+fails before writing; later connections cannot retry it.
+
+The agent reads DWORD FD6806A0 twice, requires a stable initial 0 or 0x11,
+writes `(~initial)&1` once, then records changes while polling that DWORD.
+It stops at matching bits 0/4, an unexpected value, 100,000 post-write reads,
+or 50 ms of performance-counter time. It never changes any other GPU register
+or makes a second/restoring write. Reads that themselves hang cannot be bounded
+by this software loop.
+
+The JSON contains `probe:"av_handshake"`, `schema:1`, agent/kernel version,
+`address:"0xfd6806a0"`, `outcome`, counter `frequency`, `reads`, `writes`,
+`request`, `write_ticks:[begin_tick,end_tick]`, `trace`, and `last`. Each read
+sample is `[begin_tick,end_tick,value]`,
+with ticks relative to the initial counter observation. `trace` retains the
+first word and changes (at most eight); `last` also preserves the final sample
+if unchanged. No missing or unobserved state is interpolated. On an invalid
+ending timestamp, `last.end` remains `last.begin` and the outcome is
+`counter_backwards`; that interval is not a timing measurement.
+
+`ack_observed` means only that bits 0/4 matched the new request within the
+sampling limits. Other outcomes are `counter_invalid`, `counter_backwards`,
+`initial_not_idle`, `initial_changed`, `unexpected_bits`, `trace_limit`,
+`request_not_observed`, `time_limit`, and `read_limit`. The host prints valid
+observations but returns an error for every outcome except `ack_observed`.
+Malformed, contradictory or wrong-address observations also stop the host.
+There are no automatic retries, recovery writes or relaunches.
 
 `EXEC` can bypass every other guardrail and should be treated as complete control of the
 running Xbox software environment.

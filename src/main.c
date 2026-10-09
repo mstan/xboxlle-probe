@@ -18,11 +18,12 @@
 #include <lwip/sockets.h>
 #include <nxdk/net.h>
 #include <xboxkrnl/xboxkrnl.h>
+#include "av_handshake.h"
 
 extern struct netif *g_pnetif;
 
 #define AGENT_PORT 4380
-#define AGENT_VER "xboxlle-probe v0.3.1"
+#define AGENT_VER "xboxlle-probe v0.4.0"
 #define MAX_RW 4096
 #define MAX_BULK (1u << 20)
 
@@ -154,6 +155,46 @@ static uint32_t mmio_read32(uint32_t address) {
     return *(volatile const uint32_t *)(uintptr_t)address;
 }
 
+static uint64_t av_probe_frequency(void *unused) { (void)unused; return KeQueryPerformanceFrequency(); }
+static uint64_t av_probe_clock(void *unused) { (void)unused; return KeQueryPerformanceCounter(); }
+static uint32_t av_probe_read(void *unused) { (void)unused; return mmio_read32(AV_HANDSHAKE_ADDRESS); }
+static void av_probe_write(void *unused, uint32_t value) {
+    (void)unused;
+    *(volatile uint32_t *)(uintptr_t)AV_HANDSHAKE_ADDRESS = value;
+}
+
+static void probe_av_handshake(int fd, int armed, char *reply, size_t reply_size) {
+    static int attempted; // survives connections; even a failed attempt consumes it
+    const AvHandshakeOps ops = {NULL, av_probe_frequency, av_probe_clock,
+                               av_probe_read, av_probe_write};
+    AvHandshakeResult result;
+    av_handshake_run(armed, &attempted, &ops, &result);
+    if (!strcmp(result.outcome, "not_armed")) { send_str(fd, "ERR not armed\n"); return; }
+    if (!strcmp(result.outcome, "already_attempted")) {
+        send_str(fd, "ERR AV probe already attempted; human inspection required\n"); return;
+    }
+    int n = snprintf(reply, reply_size,
+        "{\"probe\":\"av_handshake\",\"schema\":1,\"agent\":\"%s\","
+        "\"kernel\":\"%u.%u.%u.%u\",\"address\":\"0xfd6806a0\","
+        "\"outcome\":\"%s\",\"frequency\":%llu,\"reads\":%u,\"writes\":%u,"
+        "\"request\":%u,\"write_ticks\":[%llu,%llu],\"trace\":[", AGENT_VER,
+        XboxKrnlVersion.Major, XboxKrnlVersion.Minor, XboxKrnlVersion.Build, XboxKrnlVersion.Qfe,
+        result.outcome, (unsigned long long)result.frequency, result.reads, result.writes, result.request,
+        (unsigned long long)result.write_begin, (unsigned long long)result.write_end);
+    for (uint32_t i=0; i<result.trace_count && n>0 && (size_t)n<reply_size; ++i) {
+        AvHandshakeSample *s = &result.trace[i];
+        n += snprintf(reply+n, reply_size-n, "%s[%llu,%llu,%u]", i?",":"",
+                      (unsigned long long)s->begin, (unsigned long long)s->end, s->value);
+    }
+    if (n>0 && (size_t)n<reply_size) {
+        n += snprintf(reply+n, reply_size-n, "],\"last\":[%llu,%llu,%u]}\n",
+                      (unsigned long long)result.last.begin,
+                      (unsigned long long)result.last.end, result.last.value);
+    }
+    if (n<=0 || (size_t)n>=reply_size) send_str(fd, "ERR AV observation serialization\n");
+    else send_str(fd, reply);
+}
+
 static void probe_nv2a(int fd, char *reply, size_t reply_size) {
     // Fixed read-only registers measured successfully on the original v1.1 test console.
     uint32_t pmc_boot = mmio_read32(0xFD000000);
@@ -228,6 +269,9 @@ static void handle_client(int fd) {
             probe_nv2a(fd, reply, sizeof(reply));
         } else if (!strcmp(line, "PROBE CONTROLLER_S_HUB")) {
             probe_controller_s_hub(fd, reply, sizeof(reply));
+        } else if (!strcmp(line, "AV_HANDSHAKE")) {
+            probe_av_handshake(fd, armed, reply, sizeof(reply));
+            return; // no further commands in this observation connection
         } else if (!strncmp(line, "RB ", 3)) {
             uint32_t address = 0, len = 0;
             if (!armed) {

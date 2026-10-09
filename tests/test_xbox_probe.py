@@ -8,6 +8,9 @@ from pathlib import Path
 import socketserver
 import threading
 import unittest
+from unittest.mock import patch
+from contextlib import redirect_stdout
+from io import StringIO
 
 
 MODULE_PATH = Path(__file__).parents[1] / "host" / "xbox_probe.py"
@@ -46,6 +49,9 @@ class MockAgentHandler(socketserver.StreamRequestHandler):
                 else:
                     self.wfile.write(b"ERR arming disabled\n")
                     return
+            elif line == "AV_HANDSHAKE":
+                self.wfile.write((self.server.av_reply + "\n").encode("ascii"))
+                return
             elif line.startswith("EXEC "):
                 length = int(line.split()[1])
                 payload = self.rfile.read(length)
@@ -73,6 +79,13 @@ class ThreadedMockAgent(socketserver.ThreadingTCPServer):
         self.commands: list[str] = []
         self.payloads: list[bytes] = []
         self.allow_arm = True
+        self.av_reply = json.dumps({
+            "probe": "av_handshake", "schema": 1, "address": "0xfd6806a0",
+            "outcome": "ack_observed", "frequency": 1000000,
+            "reads": 4, "writes": 1, "request": 1,
+            "write_ticks": [5, 6],
+            "trace": [[1, 2, 0], [7, 8, 1], [10, 11, 17]], "last": [10, 11, 17],
+        })
 
 
 class AgentClientTests(unittest.TestCase):
@@ -94,6 +107,59 @@ class AgentClientTests(unittest.TestCase):
             "PONG xboxlle-probe test",
         )
         self.assertEqual(self.server.commands, ["PING"])
+
+    def av_args(self, accept: bool = True):
+        host, port = self.server.server_address
+        arguments = ["--host", host, "--port", str(port)]
+        if accept:
+            arguments += ["--i-accept-the-risk"]
+        return xbox_probe.build_parser().parse_args(arguments + ["av-handshake"])
+
+    def test_av_without_ack_never_connects(self):
+        with patch.object(xbox_probe.socket, "create_connection") as connect:
+            with self.assertRaisesRegex(xbox_probe.ProbeError, "requires"):
+                xbox_probe.run(self.av_args(False))
+            connect.assert_not_called()
+
+    def test_av_arms_same_session_once_and_preserves_observation(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            xbox_probe.run(self.av_args())
+        self.assertEqual(json.loads(output.getvalue()), json.loads(self.server.av_reply))
+        self.assertEqual(self.server.commands, ["ARM I_ACCEPT_THE_RISK", "AV_HANDSHAKE"])
+
+    def test_av_arming_refusal_never_sends_command(self):
+        self.server.allow_arm = False
+        with self.assertRaisesRegex(xbox_probe.ProbeError, "refused"):
+            xbox_probe.run(self.av_args())
+        self.assertEqual(self.server.commands, ["ARM I_ACCEPT_THE_RISK"])
+
+    def test_av_limit_keeps_evidence_and_does_not_retry(self):
+        data = json.loads(self.server.av_reply)
+        data.update(outcome="time_limit", trace=[[1, 2, 0], [7, 8, 1]], last=[50000, 50001, 1])
+        self.server.av_reply = json.dumps(data)
+        output = StringIO()
+        with redirect_stdout(output), self.assertRaisesRegex(xbox_probe.ProbeError, "time_limit"):
+            xbox_probe.run(self.av_args())
+        self.assertEqual(json.loads(output.getvalue()), data)
+        self.assertEqual(self.server.commands, ["ARM I_ACCEPT_THE_RISK", "AV_HANDSHAKE"])
+
+    def test_av_malformed_or_contradictory_reply_stops(self):
+        valid = json.loads(self.server.av_reply)
+        for reply in ("{", json.dumps({**valid, "writes": 0}),
+                      json.dumps({**valid, "address": "0xfd000000"}),
+                      json.dumps({**valid, "last": [10, 11, 1]}),
+                      json.dumps({**valid, "trace": [[3, 2, 0]]}),
+                      json.dumps({**valid, "outcome": []}),
+                      json.dumps({**valid, "write_ticks": [6, 5]}),
+                      json.dumps({**valid, "last": [50005, 50006, 17]}),
+                      "ERR AV probe already attempted; human inspection required"):
+            with self.subTest(reply=reply):
+                self.server.av_reply = reply
+                self.server.commands.clear()
+                with self.assertRaises(xbox_probe.ProbeError):
+                    xbox_probe.run(self.av_args())
+                self.assertEqual(self.server.commands, ["ARM I_ACCEPT_THE_RISK", "AV_HANDSHAKE"])
 
     def test_dangerous_request_arms_same_session_before_payload(self) -> None:
         reply = self.client.request(
