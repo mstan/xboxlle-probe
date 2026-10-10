@@ -131,6 +131,9 @@ benign volatile writes without repeated prompts; dangerous operations require
 separate approval and should be avoided where possible. This authorization
 does not weaken the ARM gate or permit retries after failed hardware operations.
 
+The [fixed read-only GP context](GP-CONTEXT.md) also uses existing ARM/EXEC
+without starting a DSP/DMA, changing SG pointers or adding a wire command.
+
 Errors are one-line strings beginning with `ERR`. Clients must treat unexpected replies,
 timeouts, short bulk transfers, and malformed JSON as failures. They must not retry hardware
 operations automatically.
