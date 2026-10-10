@@ -139,6 +139,11 @@ protocol to run a fixed authored six-word P program over newly owned boot/SG
 storage. Its seven device stores and stop/restoration limits are documented
 separately; no descriptor DMA or new agent wire command is added.
 
+The [fixed read-only GP mapping query](GP-MAPPING.md) uses existing ARM/EXEC
+for bounded kernel mapping/physical-address queries and eight device reads.
+It performs zero device stores or inherited SG RAM loads; mapping is not
+allocation ownership and does not authorize a following RAM dereference.
+
 Errors are one-line strings beginning with `ERR`. Clients must treat unexpected replies,
 timeouts, short bulk transfers, and malformed JSON as failures. They must not retry hardware
 operations automatically.

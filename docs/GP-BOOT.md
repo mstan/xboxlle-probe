@@ -126,3 +126,10 @@ relaunched v0.4.0. All eight fresh context reads complete with zero device
 stores, stable GP reset/AV endpoints and unchanged SG maxima. The agent is
 available again; no failed RAM load or SG write has been repeated. A screen
 freeze and the timeout cause are not established.
+
+The distinct [read-only mapping query](GP-MAPPING.md) subsequently completed
+with calibrated kernel API semantics, eight device reads, zero device stores
+and zero inherited SG RAM loads. All four current inherited CPU-alias pages
+are reported unmapped. The query does not establish allocation ownership or
+explain the previous context's timeout; that range is not dereferenced. The
+failed SG write/load are not retried and GP boot/bit9 remain unqualified.
