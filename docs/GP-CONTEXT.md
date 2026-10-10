@@ -29,3 +29,27 @@ loss of console output/network stops for human inspection, saving raw results
 privately. No failure is automatically retried. Hardware-free tests execute
 every fixed payload and verify the exact read/write whitelist and host stop
 behavior. This prepares later owned-memory design without executing it.
+
+The distinct `--quiet-controls` batch substitutes four read-only DWORDs:
+APU interrupt enable FE801004, setup control FE802000, frontend control
+FE801100 and interrupt status FE801000. It retains the two GP reset and two
+AV endpoint reads, for eight reads total and zero device writes. It does not
+clear interrupt status or infer that observed control values establish safe
+GP takeover. Payload tests cover both closed lists.
+
+Preparation identified an essential dependency: xemu's GP bootstrap model
+bootstrap loads `800` DWORDs (8192 bytes) from scratch into P memory. A design
+that installs a single 4096-byte SG page and writes P directly before releasing
+reset would not provide that bootstrap image. No such write has been executed.
+Any later experiment must own and bound the entire boot source and sample/SG
+storage, account for CPU/GP IRQ and setup-engine state, and observe completion
+before restoring shared pointers. Emulator bootstrap behavior remains a lead
+to verify, not independently qualified hardware behavior.
+
+The observed follow-ups completed with GP reset `0` and AV `11` at both
+endpoints. Scratch/FIFO SG pointers were nonzero; their maxima were1544/1.
+The separate control batch observed IEN=`AFA`, SECTL=`7`, FECTL=`71F8F`,
+ISTS=`0`. Under the factual masks in apu_regs.h, these samples have the
+global interrupt-enable bit clear, XCNTMODE OFF and the frontend HALTED.
+They do not establish reset defaults, CPU-writer exclusion or DMA completion.
+No DSP/SG/control write has been performed by these batches.

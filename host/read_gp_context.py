@@ -24,10 +24,20 @@ OPERATIONS = (
     ('gp_reset_after', 0xfe83fffc),
     ('av_after', 0xfd6806a0),
 )
+QUIET_OPERATIONS = (
+    ('av_before', 0xfd6806a0),
+    ('gp_reset_before', 0xfe83fffc),
+    ('apu_interrupt_enable', 0xfe801004),
+    ('apu_setup_control', 0xfe802000),
+    ('apu_frontend_control', 0xfe801100),
+    ('apu_interrupt_status', 0xfe801000),
+    ('gp_reset_after', 0xfe83fffc),
+    ('av_after', 0xfd6806a0),
+)
 
 
 def read_payload(address):
-    if type(address) is not int or address not in {item[1] for item in OPERATIONS}:
+    if type(address) is not int or address not in {item[1] for item in OPERATIONS + QUIET_OPERATIONS}:
         raise ProbeError('address outside the fixed GP-context list')
     return b'\xa1' + struct.pack('<I', address) + b'\xc3'
 
@@ -41,6 +51,9 @@ def run(args):
     status = dict(started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   status='started', exec_requests_may_have_been_sent=0,
                   hardware_writes_requested=0, automatic_retry=False)
+    quiet_controls = getattr(args, 'quiet_controls', False)
+    operations = QUIET_OPERATIONS if quiet_controls else OPERATIONS
+    status['quiet_controls'] = quiet_controls
     observations = []; reset = None
     def checkpoint():
         (output / 'status.json').write_text(json.dumps(status, indent=2) + '\n')
@@ -50,7 +63,7 @@ def run(args):
         if reply != 'PONG xboxlle-probe v0.4.0':
             raise ProbeError('unexpected agent; stop before ARM/EXEC')
         with (output / 'reads-raw.jsonl').open('x') as file:
-            for name, address in OPERATIONS:
+            for name, address in operations:
                 payload = read_payload(address)
                 status.update(stage=name, exec_requests_may_have_been_sent=
                               status['exec_requests_may_have_been_sent'] + 1); checkpoint()
@@ -65,6 +78,7 @@ def run(args):
                     raise ProbeError('changed GP reset context; stop for human inspection')
                 observations.append(dict(name=name, address=hex(address), value=value))
         summary = dict(schema=1, status='context_observed', reads=len(observations),
+                       quiet_controls=quiet_controls,
                        hardware_writes_requested=0, observations=observations,
                        automatic_retry=False,
                        limitations=['Sequential current nxdk context, not reset defaults',
@@ -83,6 +97,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host', required=True); parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--i-accept-the-risk', action='store_true')
+    parser.add_argument('--quiet-controls', action='store_true', help='distinct fixed APU control/status context')
     try: return run(parser.parse_args())
     except (OSError, ProbeError, ValueError) as error:
         print('Stopped before hardware commands: ' + str(error), file=sys.stderr); return 2
