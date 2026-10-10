@@ -134,6 +134,11 @@ does not weaken the ARM gate or permit retries after failed hardware operations.
 The [fixed read-only GP context](GP-CONTEXT.md) also uses existing ARM/EXEC
 without starting a DSP/DMA, changing SG pointers or adding a wire command.
 
+The [owned-memory GP bootstrap marker](GP-BOOT.md) uses the same ARM/EXEC
+protocol to run a fixed authored six-word P program over newly owned boot/SG
+storage. Its seven device stores and stop/restoration limits are documented
+separately; no descriptor DMA or new agent wire command is added.
+
 Errors are one-line strings beginning with `ERR`. Clients must treat unexpected replies,
 timeouts, short bulk transfers, and malformed JSON as failures. They must not retry hardware
 operations automatically.
