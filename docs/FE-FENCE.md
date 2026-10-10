@@ -49,8 +49,8 @@ The closed payload:
    100,000 post-release loop iterations,
    stopping on the token or an unexpected RAM word. It makes one additional
    terminal read. This is a poll bound, not a timed delay measurement.
-6. Performs the planned restoration of control bit0 to `1`, retaining
-   any fresh unrelated bits, and checks actual control readback. This is
+6. Requires fresh control exactly `0` before the planned restoration of bit0
+   to `1`, and checks actual control readback. This is
    the fifth and last MMIO store. Changed unrelated bits, failed restoration,
    malformed token/return or timeout never qualifies as success.
 
@@ -103,3 +103,12 @@ Kernel API/ordinal/protection facts are from the pinned
 and [export declarations](https://github.com/XboxDev/nxdk/blob/29638d0b001f179b73c3513489af10ddc2986216/lib/xboxkrnl/xboxkrnl.exe.def).
 Only factual declarations are used; no implementation body or owned Xbox
 code is redistributed.
+
+Subsequent offline hardening checks changed/all-ones fresh control **before**
+the restoration store, and stops immediately on unexpected held-window control
+or token. Earlier source checked the restored value after writing, which could
+propagate unknown bits. Successful store effects are unchanged. The original
+888/968-byte observed payloads are preserved in earlier commits; hardened
+payloads have not been rerun on hardware and are not substituted into that
+historical evidence. The focused FE/bank tests execute actual hardened bytes
+and require no unknown-word write, no retry and no page free on failure.

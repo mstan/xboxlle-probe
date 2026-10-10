@@ -15,10 +15,12 @@ The actual closed x86 payload in `host/observe_fp_banks.py`:
 2. Clears only READ_PROG with one DWORD write to FD680848.
 3. Verifies actual selector readback is 10000111, then reads horizontal
    total FD680824 and vertical total FD680804, one DWORD each. A failed
-   selector check skips both reads and continues to the planned restoration
-   before reporting failure. No other timing register is read or written.
-4. Reads fresh FD680848, sets READ_PROG to its original value, and writes
-   that control back. Other fresh bits are preserved. This is the second
+   selector check skips both reads; a planned restoration is permitted only
+   if fresh control is exactly the selected value. No other timing register
+   is read or written.
+4. Reads fresh FD680848 and requires exactly 10000111 **before** any restoration
+   store. Changed/all-ones words fail without propagating unknown bits. Sets
+   READ_PROG to its original value and writes that known control back. This is the second
    and last MMIO write, part of the planned successful path, not a retry.
 5. Reads actual control back and requires original 10100111; also requires
    both timing values fit twelve bits. Returns tagged packed totals or an
@@ -38,3 +40,9 @@ returned with READ_PROG clear; treating them as an active bank uses those
 definitions. It does not independently measure output signals or prove
 when FD6806A0 commits timing. Equal totals do not establish equality of
 all other fields, instantaneous activation, reset values or counter phase.
+
+Later offline hardening moved the fresh-control validation before restoration.
+The original successful hardware payload is preserved in commit `f89e003`;
+the hardened version has not been rerun on hardware. Successful effects remain
+six reads/two selector stores. Actual instruction tests also verify that a
+changed fresh word or ignored selector store produces no second write.

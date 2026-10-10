@@ -104,9 +104,12 @@ class FenceTests(unittest.TestCase):
         result=self.execute(held_window=True,token_after=17)
         self.assertEqual(result['result'],0xf1000011);self.assertEqual(result['held_polls'],1000)
         result=self.execute(held_window=True,token_phase='held',wrong_token=True)
-        self.assertEqual(result['result']>>24,0xf2)
-        result=self.execute(held_window=True,token_phase='held',changed_held_control=0)
-        self.assertEqual(result['result']>>24,0xf2)
+        self.assertEqual(result['result'],0xfa000007)
+        self.assertEqual(len(result['stores']),3)
+        for value in (0,8,0xffffffff):
+            result=self.execute(held_window=True,token_phase='held',changed_held_control=value)
+            self.assertEqual(result['result'],0xfa000007)
+            self.assertEqual(len(result['stores']),3)
 
     def test_held_window_timeout_has_no_free_or_extra_store(self):
         result=self.execute(held_window=True,token_after=None)
@@ -158,9 +161,11 @@ class FenceTests(unittest.TestCase):
     def test_wrong_device_value_or_failed_restore_cannot_qualify(self):
         self.assertEqual(self.execute(wrong_token=True)['result']>>24,0xf2)
         self.assertEqual(self.execute(ignore_restore=True)['result'],0xfa000006)
-        result=self.execute(changed_control=8)
-        self.assertEqual(result['result'],0xfa000006)
-        self.assertEqual(result['stores'][-1],(0xfe801510,9))
+        for value in (8,0xffffffff):
+            result=self.execute(changed_control=value)
+            self.assertEqual(result['result'],0xfa000006)
+            self.assertEqual(result['stores'][-1],(0xfe801510,0))
+            self.assertEqual(len(result['stores']),4)
 
     def host(self,reply='RET f1000001',risk=True,identity='PONG xboxlle-probe v0.4.0',held_window=False):
         with tempfile.TemporaryDirectory() as directory:

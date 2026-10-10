@@ -19,7 +19,8 @@ from unicorn.x86_const import (UC_X86_REG_EAX, UC_X86_REG_EBX, UC_X86_REG_ECX,
 
 
 class BankTests(unittest.TestCase):
-    def execute(self, initial=0x10100111, htotal=935, vtotal=524, ignore_clear=False, ignore_restore=False):
+    def execute(self, initial=0x10100111, htotal=935, vtotal=524, ignore_clear=False,
+                ignore_restore=False, fresh_control=None):
         uc = Uc(UC_ARCH_X86, UC_MODE_32)
         uc.mem_map(0x1000, 0x1000); uc.mem_write(0x1000, banks.payload())
         uc.mem_map(0x7000, 0x2000); uc.mem_write(0x8000, struct.pack('<I', 0x1800))
@@ -30,11 +31,14 @@ class BankTests(unittest.TestCase):
                      UC_X86_REG_EDI: 0x34567890, UC_X86_REG_EBP: 0x4567890a,
                      UC_X86_REG_EFLAGS: 0x247}
         for reg, value in registers.items(): uc.reg_write(reg, value)
-        control = [initial]; stores = []; reads = []
+        control = [initial]; stores = []; reads = []; control_reads = [0]
         def read(u, access, address, size, value, data):
             if address < 0xfd680000: return
             self.assertEqual(size, 4); reads.append(address)
-            if address == 0xfd680848: value = control[0]
+            if address == 0xfd680848:
+                control_reads[0] += 1
+                if control_reads[0] == 3 and fresh_control is not None: control[0] = fresh_control
+                value = control[0]
             elif address == 0xfd680824: value = htotal
             elif address == 0xfd680804: value = vtotal
             else: self.fail('unapproved MMIO read')
@@ -76,7 +80,13 @@ class BankTests(unittest.TestCase):
         result, control, stores, reads = self.execute(ignore_clear=True)
         self.assertEqual(result, 0xffffffff); self.assertEqual(control, 0x10100111)
         self.assertNotIn(0xfd680824, reads); self.assertNotIn(0xfd680804, reads)
-        self.assertEqual(len(stores), 2)
+        self.assertEqual(len(stores), 1)
+
+    def test_changed_fresh_word_is_never_written_back(self):
+        for value in (0, 0xffffffff, 0x10000119, 0x10100111):
+            result, control, stores, reads = self.execute(fresh_control=value)
+            self.assertEqual(result, 0xffffffff); self.assertEqual(control, value)
+            self.assertEqual(stores, [0x10000111])
 
     def test_failed_restore_cannot_return_success(self):
         result, control, stores, reads = self.execute(ignore_restore=True)

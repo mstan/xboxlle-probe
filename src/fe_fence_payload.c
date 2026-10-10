@@ -50,6 +50,7 @@ u32 fe_fence_probe(void) {
     early=held==TOKEN ? 0x00800000u : 0u;
     u32 held_after=WORD(FE_CONTROL);
     invalid_held=(held!=INITIAL && held!=TOKEN) || held_before!=1u || held_after!=1u;
+    if (invalid_held) return 0xfa000007u;
 #endif
     WORD(FE_CONTROL)=0u;
     u32 polls;
@@ -63,8 +64,9 @@ u32 fe_fence_probe(void) {
     /* Planned selector/control restoration, never a retry. Preserve fresh
      * unrelated bits rather than installing the old whole register word.
      */
+    if (control!=0u) return 0xfa000006u;
     WORD(FE_CONTROL)=control|1u;
-    if (control!=0u || WORD(FE_CONTROL)!=1u) return 0xfa000006u;
+    if (WORD(FE_CONTROL)!=1u) return 0xfa000006u;
     if (last!=TOKEN || polls>LIMIT || invalid_held) return 0xf2000000u | (polls&0x1ffffu);
     return 0xf1000000u | early | polls;
 }

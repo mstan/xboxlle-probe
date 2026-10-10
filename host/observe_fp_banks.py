@@ -30,7 +30,9 @@ def payload():
     jump('eb', 'restore')
     labels['invalid_bank'] = len(code); emit('b9 ffffffff ba ffffffff')
     labels['restore'] = len(code)
-    emit('a1 480868fd 0d 00001000 a3 480868fd') # restore bit20, preserve others
+    emit('a1 480868fd 3d 11010010')           # reject changed fresh control before store
+    jump('75', 'error')
+    emit('0d 00001000 a3 480868fd')           # restore only known bit20
     emit('a1 480868fd 3d 11011010')           # verify actual restored control
     jump('75', 'error')
     emit('81f9 ff0f0000'); jump('77', 'error') # reject unexpected timing widths
