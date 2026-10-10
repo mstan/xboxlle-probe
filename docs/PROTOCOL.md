@@ -12,7 +12,7 @@ without a `0x` prefix.
 
 | Command | Reply | Meaning |
 |---|---|---|
-| `PING` | `PONG xboxlle-probe v0.3.1` | Liveness and version |
+| `PING` | `PONG xboxlle-probe v0.4.0` | Liveness and version |
 | `INFO` | one JSON line | Agent, kernel, tick count, port, armed state |
 | `STATUS` | `SAFE` or `ARMED` | Current session state |
 | `PROBE CPU` | one JSON line | CPUID vendor, signature, and feature words |
@@ -104,6 +104,11 @@ There are no automatic retries, recovery writes or relaunches.
 
 `EXEC` can bypass every other guardrail and should be treated as complete control of the
 running Xbox software environment.
+
+The separately reviewed [fixed read-only AV context batch](AV-CONTEXT.md)
+uses existing ARM/EXEC messages with a fixed six-byte DWORD-load payload.
+It needs its own exact-operation approval; authorization for `AV_HANDSHAKE`
+does not authorize EXEC. It changes no agent wire command or one-shot AV latch.
 
 `R` and `RB` are transport operations, not declarations that a target range is harmless or
 redistributable. They are armed because a prototype agent froze real hardware on an unsafe

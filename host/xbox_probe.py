@@ -202,7 +202,7 @@ def _av_handshake_reply(reply: str) -> None:
         raise ProbeError(f"AV observation stopped: {data['outcome']}; inspect console, do not retry")
 
 
-def _ftp_password(args: argparse.Namespace) -> str:
+def _ftp_pass(args: argparse.Namespace) -> str:
     password = args.ftp_password or os.environ.get("XBOX_PROBE_FTP_PASSWORD")
     if password:
         return password
@@ -319,7 +319,7 @@ def run(args: argparse.Namespace) -> None:
             args.xbe,
             remote_dir=args.remote_dir,
             ftp_user=args.ftp_user,
-            ftp_password=_ftp_password(args),
+            ftp_password=_ftp_pass(args),
             timeout=args.timeout,
         )
         return
