@@ -81,3 +81,18 @@ Positive observation qualifies only this supplied marker program in the
 observed quiet context. It does not qualify retail GP firmware, descriptor
 bit9, whole graph, output/frame signalling, EP/AC97, exact boot latency or
 the full audio family. Raw results and source/payload hashes stay private.
+
+## First hardware attempt (2026-10-10)
+
+The payload returned `DF000008`: the first scratch SG-address store did not
+read back as requested. All preceding allocation, initialization and context
+checks passed. The payload stopped immediately, before the SG-maximum store
+or GP reset release. No DSP start, descriptor DMA, audio enable or recovery
+store followed. The new28KB allocation remains retained.
+
+The return identifies the failed stage, but does not encode the requested
+address or actual readback. It therefore establishes neither the mismatch
+cause nor GP bootstrap behavior. The current SG base is unknown; do not free
+its possible backing memory. Hardware requests remain paused for human
+inspection under AGENTS.md rule8. No automatic retry is allowed. A later
+read-only context check can characterize the stopped state after inspection.
