@@ -116,6 +116,11 @@ read.
 
 ## Errors
 
+Fixed follow-up host tools use existing ARM-guarded EXEC without new wire
+commands or XBE changes: [read-only board context](BOARD-CONTEXT.md) and
+[reversible display-bank selector observation](FP-BANKS.md). Their exact
+effects, authorization scope and stop conditions are documented separately.
+
 Errors are one-line strings beginning with `ERR`. Clients must treat unexpected replies,
 timeouts, short bulk transfers, and malformed JSON as failures. They must not retry hardware
 operations automatically.

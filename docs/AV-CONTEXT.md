@@ -2,9 +2,12 @@
 
 Follow-up to the first authorized FD6806A0 observation in
 [`xboxlle`'s GPU record](https://github.com/mstan/xboxlle/blob/feat/blinx-audio-lle-20261009/pilots/native-title/GPU-COMPLETION-LLE.md#first-authorized-av-handshake-observation---2026-10-09).
-The earlier single-write authorization does **not** authorize this EXEC batch.
-The host tool is prepared for separate exact-operation approval under
-[AGENTS.md](../AGENTS.md). No new hardware operation is claimed here.
+The owner separately authorized this batch on 2026-10-10; all 23 reads
+completed with stable AV endpoints and zero MMIO writes. The owner then
+authorized read-only checks and benign writes without repeated prompts,
+while advising against dangerous operations. Other operators still require
+authorization under [AGENTS.md](../AGENTS.md). Raw observations remain private;
+the sanitized results and limitations are in xboxlle's GPU record.
 
 ## Concrete operation for review
 
