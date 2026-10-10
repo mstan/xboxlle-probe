@@ -123,6 +123,14 @@ effects, authorization scope and stop conditions are documented separately.
 The [owned-RAM FE fence experiment](FE-FENCE.md) also uses existing EXEC;
 it changes no wire command or Xbox agent implementation.
 
+The [reverse AV request](AV-REVERSE.md) and [one-pixel valid-window and read-only
+mode context](FP-ACTIVATION.md) follow-ups also retain the existing ARM/EXEC
+protocol and one-shot AV_HANDSHAKE latch. Their fixed effects and stop conditions
+are documented separately. The owner explicitly permits read-only checks and
+benign volatile writes without repeated prompts; dangerous operations require
+separate approval and should be avoided where possible. This authorization
+does not weaken the ARM gate or permit retries after failed hardware operations.
+
 Errors are one-line strings beginning with `ERR`. Clients must treat unexpected replies,
 timeouts, short bulk transfers, and malformed JSON as failures. They must not retry hardware
 operations automatically.

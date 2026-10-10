@@ -8,43 +8,17 @@ import argparse
 import datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 
+from payload_build import compile_fixed
 from xbox_probe import AgentClient, ProbeError, _require_risk
 
 
 def compiled_payload(held_window=False):
-    if type(held_window) is not bool: raise ProbeError('closed payload variant must be a Boolean')
-    root = Path(__file__).resolve().parents[1]
-    binary = Path('C:/msys64/mingw64/bin') if os.name == 'nt' else None
-    def tool(name):
-        value = str(binary / (name + '.exe')) if binary else shutil.which(name)
-        if not value or not Path(value).is_file(): raise ProbeError('required offline build tool unavailable: ' + name)
-        return value
-    with tempfile.TemporaryDirectory(prefix='fe-fence-payload-') as directory:
-        obj = Path(directory) / 'payload.o'; raw = Path(directory) / 'payload.bin'
-        subprocess.run([tool('gcc'), '-m32', '-Os', '-std=c11', '-Wall', '-Wextra', '-Werror',
-                        '-DFE_OBSERVE_HELD='+str(int(held_window)),
-                        '-ffreestanding', '-fno-stack-protector', '-fno-pic', '-fno-ident',
-                        '-fno-asynchronous-unwind-tables', '-fno-unwind-tables',
-                        '-c', str(root / 'src/fe_fence_payload.c'), '-o', str(obj)],
-                       check=True, capture_output=True, timeout=30)
-        relocation = subprocess.check_output([tool('objdump'), '-r', str(obj)], text=True, timeout=10)
-        if 'RELOCATION RECORDS FOR' in relocation: raise ProbeError('payload contains unresolved relocations')
-        symbols = subprocess.check_output([tool('objdump'), '-t', str(obj)], text=True, timeout=10)
-        if not re.search(r'0{8}\s+_?fe_fence_probe\s*$', symbols, re.M):
-            raise ProbeError('payload entry is not text offset zero')
-        subprocess.run([tool('objcopy'), '-O', 'binary', '-j', '.text', str(obj), str(raw)],
-                       check=True, capture_output=True, timeout=10)
-        code = raw.read_bytes()
-        if not 1 <= len(code) <= 4096: raise ProbeError('unexpected payload size')
-        return code
+    return compile_fixed('fe_fence', held_window)
 
 
 def run(args):
@@ -59,6 +33,7 @@ def run(args):
                   status='started', exec_request_may_have_been_sent=False,
                   payload_sha256=hashlib.sha256(code).hexdigest(), payload_bytes=len(code),
                   source_sha256=hashlib.sha256((root/'src/fe_fence_payload.c').read_bytes()).hexdigest(),
+                  kernel_header_sha256=hashlib.sha256((root/'src/payload_kernel32.h').read_bytes()).hexdigest(),
                   mmio_writes_permitted=5, retained_owned_scratch_bytes_max=4096,
                   held_window=held_window, held_window_reads_max=1000 if held_window else 0,
                   automatic_retry=False)
