@@ -96,3 +96,33 @@ cause nor GP bootstrap behavior. The current SG base is unknown; do not free
 its possible backing memory. Hardware requests remain paused for human
 inspection under AGENTS.md rule8. No automatic retry is allowed. A later
 read-only context check can characterize the stopped state after inspection.
+
+## Authorized read-only follow-up (2026-10-10)
+
+The owner later authorized continued reads, including unexpected read outcomes,
+and retained the stop condition for unexpected writes. A distinct fixed GP
+context batch completed all eight reads with zero device stores. GP reset and
+AV endpoints remained unchanged; scratch/FIFO maxima remained1544/1. The scratch
+SG address differs from the pre-write observation, while the other seven
+context words match. Its raw value stays private. This is a later context sample;
+the failed payload did not retain its requested address or instantaneous
+readback, so the cause of `DF000008` remains unestablished. No write was retried.
+
+A bounded candidate-RAM identification attempt followed. Generic `R` rejected
+the high CPU alias before access. A separate six-byte DWORD-load/return payload
+passed offline single-load/no-store/callee-state checks, but its first hardware
+load timed out and returned no word. A subsequent distinct health PING also
+timed out. There were no device stores, DSP start, DMA, storage operations,
+recovery stores or allocation frees. The agent is unavailable pending the
+owner's screen report/restart; no failed load is automatically repeated.
+
+An SG register value does not prove CPU mapping validity or allocation
+ownership. Establish mapping validity before any later RAM dereference.
+Retain the possible backing allocations until an ordinary restart. Neither
+this context nor the failed RAM identification qualifies GP bootstrap.
+
+The owner subsequently reported a normal-looking screen, restarted, and
+relaunched v0.4.0. All eight fresh context reads complete with zero device
+stores, stable GP reset/AV endpoints and unchanged SG maxima. The agent is
+available again; no failed RAM load or SG write has been repeated. A screen
+freeze and the timeout cause are not established.
