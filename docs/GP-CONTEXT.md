@@ -47,7 +47,7 @@ before restoring shared pointers. Emulator bootstrap behavior remains a lead
 to verify, not independently qualified hardware behavior.
 
 The observed follow-ups completed with GP reset `0` and AV `11` at both
-endpoints. Scratch/FIFO SG pointers were nonzero; their maxima were1544/1.
+endpoints. Scratch/FIFO SG pointers were nonzero; their maxima were 1544/1.
 The separate control batch observed IEN=`AFA`, SECTL=`7`, FECTL=`71F8F`,
 ISTS=`0`. Under the factual masks in apu_regs.h, these samples have the
 global interrupt-enable bit clear, XCNTMODE OFF and the frontend HALTED.
