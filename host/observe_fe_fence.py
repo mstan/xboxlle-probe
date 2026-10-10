@@ -19,7 +19,8 @@ import tempfile
 from xbox_probe import AgentClient, ProbeError, _require_risk
 
 
-def compiled_payload():
+def compiled_payload(held_window=False):
+    if type(held_window) is not bool: raise ProbeError('closed payload variant must be a Boolean')
     root = Path(__file__).resolve().parents[1]
     binary = Path('C:/msys64/mingw64/bin') if os.name == 'nt' else None
     def tool(name):
@@ -29,6 +30,7 @@ def compiled_payload():
     with tempfile.TemporaryDirectory(prefix='fe-fence-payload-') as directory:
         obj = Path(directory) / 'payload.o'; raw = Path(directory) / 'payload.bin'
         subprocess.run([tool('gcc'), '-m32', '-Os', '-std=c11', '-Wall', '-Wextra', '-Werror',
+                        '-DFE_OBSERVE_HELD='+str(int(held_window)),
                         '-ffreestanding', '-fno-stack-protector', '-fno-pic', '-fno-ident',
                         '-fno-asynchronous-unwind-tables', '-fno-unwind-tables',
                         '-c', str(root / 'src/fe_fence_payload.c'), '-o', str(obj)],
@@ -51,12 +53,14 @@ def run(args):
     if output.is_relative_to(root) and not output.is_relative_to(root / 'results'):
         raise ProbeError('raw results must remain private')
     output.mkdir(parents=True, exist_ok=False)
-    code = compiled_payload()
+    held_window=getattr(args,'held_window',False)
+    code = compiled_payload(held_window)
     status = dict(started_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   status='started', exec_request_may_have_been_sent=False,
                   payload_sha256=hashlib.sha256(code).hexdigest(), payload_bytes=len(code),
                   source_sha256=hashlib.sha256((root/'src/fe_fence_payload.c').read_bytes()).hexdigest(),
                   mmio_writes_permitted=5, retained_owned_scratch_bytes_max=4096,
+                  held_window=held_window, held_window_reads_max=1000 if held_window else 0,
                   automatic_retry=False)
     def checkpoint(): (output/'status.json').write_text(json.dumps(status, indent=2)+'\n')
     checkpoint(); agent = AgentClient(args.host, timeout=8.0)
@@ -68,10 +72,12 @@ def run(args):
         (output/'reply.txt').write_text(reply+'\n')
         if not re.fullmatch(r'RET [0-9a-fA-F]{8}', reply): raise ProbeError('malformed payload return')
         word = int(reply[4:],16); polls = word&0x1ffff
-        if word>>24 != 0xf1 or word&0x00fe0000 or not 1 <= polls <= 100000:
+        if word>>24 != 0xf1 or word&0x007e0000 or (not held_window and word&0x00800000) or not 1 <= polls <= 100000:
             raise ProbeError('FE precondition/allocation/restore/fence observation failed; human inspection required')
         summary=dict(schema=1,status='owned_ram_fence_observed',polls=polls,mmio_writes=5,
                      restored_control=1,retained_owned_scratch_bytes=4096,automatic_retry=False,
+                     held_window=held_window,
+                     token_visible_before_release=bool(word&0x00800000) if held_window else None,
                      limitations=['Idle application context; no queued audio-work or DMA ordering qualification',
                                   'Poll count is not a hardware delay measurement',
                                   'Page retained until restart to prevent late-write use after free'])
@@ -89,6 +95,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--host',required=True);parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--i-accept-the-risk',action='store_true')
+    parser.add_argument('--held-window',action='store_true',help='distinct bounded pre-release RAM observation')
     try:return run(parser.parse_args())
     except (OSError,ProbeError,ValueError,subprocess.SubprocessError) as error:
         print('Stopped before hardware commands: '+str(error),file=sys.stderr);return 2

@@ -19,12 +19,14 @@ from unicorn.x86_const import (UC_X86_REG_EAX,UC_X86_REG_EBX,UC_X86_REG_ESI,UC_X
 
 class FenceTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls): cls.code=fence.compiled_payload()
+    def setUpClass(cls):
+        cls.code=fence.compiled_payload();cls.held_code=fence.compiled_payload(True)
 
     def execute(self,initial=1,malformed=None,allocation=0x80180000,physical=0x180000,
-                token_after=1,wrong_token=False,ignore_restore=False,changed_control=None):
+                token_after=1,wrong_token=False,ignore_restore=False,changed_control=None,
+                held_window=False,token_phase='released',changed_held_control=None):
         uc=Uc(UC_ARCH_X86,UC_MODE_32)
-        uc.mem_map(0x1000,0x1000);uc.mem_write(0x1000,self.code)
+        uc.mem_map(0x1000,0x1000);uc.mem_write(0x1000,self.held_code if held_window else self.code)
         uc.mem_map(0x7000,0x2000);uc.mem_write(0x8000,struct.pack('<I',0x1800))
         uc.reg_write(UC_X86_REG_ESP,0x8000)
         uc.mem_map(0x80010000,0x40000);uc.mem_map(0xfe801000,0x1000)
@@ -41,6 +43,7 @@ class FenceTests(unittest.TestCase):
                    UC_X86_REG_EDI:0x34567890,UC_X86_REG_EBP:0x4567890a}
         for reg,value in preserved.items():uc.reg_write(reg,value)
         calls=[];stores=[];cpu_scratch=[];reads=[];control=[initial];submitted=[False];polls=[0]
+        data_written=[False];held_polls=[0]
         def function(u,address,size,data):
             if address not in (0x8001a000,0x8001b000):return
             sp=u.reg_read(UC_X86_REG_ESP)
@@ -59,6 +62,11 @@ class FenceTests(unittest.TestCase):
             if address==0xfe801510:
                 reads.append(address);word(address,control[0])
             elif address==allocation and allocation:
+                if data_written[0] and not submitted[0]:
+                    held_polls[0]+=1
+                    if changed_held_control is not None:control[0]=changed_held_control
+                    if token_phase=='held' and token_after is not None and held_polls[0]>=token_after:
+                        word(address,0xdeadbeef if wrong_token else 0x5a34f00e)
                 if submitted[0]:
                     polls[0]+=1
                     if changed_control is not None:control[0]=changed_control
@@ -73,7 +81,8 @@ class FenceTests(unittest.TestCase):
                     if not (ignore_restore and submitted[0]):control[0]=value
                     if value==0:submitted[0]=True
                 elif address==0xfe801324:self.assertEqual(value,physical)
-                elif address==0xfe801334:self.assertEqual(value,0x5a34f00e)
+                elif address==0xfe801334:
+                    self.assertEqual(value,0x5a34f00e);data_written[0]=True
             elif allocation and address==allocation:
                 cpu_scratch.append(value);self.assertEqual(value,0xa5cb0ff1)
             else:
@@ -84,7 +93,26 @@ class FenceTests(unittest.TestCase):
         self.assertEqual(uc.reg_read(UC_X86_REG_ESP),0x8004)
         for reg,value in preserved.items():self.assertEqual(uc.reg_read(reg),value)
         return dict(result=uc.reg_read(UC_X86_REG_EAX),control=control[0],calls=calls,stores=stores,
-                    cpu_scratch=cpu_scratch,polls=polls[0])
+                    cpu_scratch=cpu_scratch,polls=polls[0],held_polls=held_polls[0])
+
+    def test_held_window_reports_actual_phase_and_restores(self):
+        for delay in (1,17,1000):
+            result=self.execute(held_window=True,token_phase='held',token_after=delay)
+            self.assertEqual(result['result'],0xf1800001)
+            self.assertEqual(result['held_polls'],delay);self.assertEqual(result['control'],1)
+            self.assertEqual(len(result['stores']),5)
+        result=self.execute(held_window=True,token_after=17)
+        self.assertEqual(result['result'],0xf1000011);self.assertEqual(result['held_polls'],1000)
+        result=self.execute(held_window=True,token_phase='held',wrong_token=True)
+        self.assertEqual(result['result']>>24,0xf2)
+        result=self.execute(held_window=True,token_phase='held',changed_held_control=0)
+        self.assertEqual(result['result']>>24,0xf2)
+
+    def test_held_window_timeout_has_no_free_or_extra_store(self):
+        result=self.execute(held_window=True,token_after=None)
+        self.assertEqual(result['result']>>24,0xf2)
+        self.assertEqual(result['held_polls'],1000);self.assertEqual(len(result['stores']),5)
+        self.assertEqual([name for name,args in result['calls']],['allocate','physical'])
 
     def test_actual_immediate_and_delayed_ram_visibility(self):
         for delay in (1,2,17,100000):
@@ -134,7 +162,7 @@ class FenceTests(unittest.TestCase):
         self.assertEqual(result['result'],0xfa000006)
         self.assertEqual(result['stores'][-1],(0xfe801510,9))
 
-    def host(self,reply='RET f1000001',risk=True,identity='PONG xboxlle-probe v0.4.0'):
+    def host(self,reply='RET f1000001',risk=True,identity='PONG xboxlle-probe v0.4.0',held_window=False):
         with tempfile.TemporaryDirectory() as directory:
             output=Path(directory)/'session';calls=[]
             class Agent:
@@ -145,7 +173,7 @@ class FenceTests(unittest.TestCase):
                     if isinstance(reply,Exception):raise reply
                     return reply
             with patch.object(fence,'compiled_payload',return_value=self.code),patch.object(fence,'AgentClient',Agent),redirect_stdout(io.StringIO()),redirect_stderr(io.StringIO()):
-                try:result=fence.run(argparse.Namespace(host='127.0.0.1',output=output,i_accept_the_risk=risk))
+                try:result=fence.run(argparse.Namespace(host='127.0.0.1',output=output,i_accept_the_risk=risk,held_window=held_window))
                 except fence.ProbeError:result=3
             return result,calls,{p.name:p.read_text() for p in output.glob('*')}
 
@@ -163,6 +191,13 @@ class FenceTests(unittest.TestCase):
             self.assertEqual(result,2);self.assertEqual(len(calls),2)
             self.assertNotIn('summary.json',files)
             if isinstance(bad,str):self.assertIn(bad,files['reply.txt'])
+
+    def test_host_phase_bit_requires_correct_variant(self):
+        result,calls,files=self.host(reply='RET f1800001')
+        self.assertEqual(result,2)
+        result,calls,files=self.host(reply='RET f1800001',held_window=True)
+        self.assertEqual(result,0)
+        self.assertTrue(json.loads(files['summary.json'])['token_visible_before_release'])
 
 
 if __name__=='__main__':unittest.main()

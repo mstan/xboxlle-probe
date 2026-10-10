@@ -13,6 +13,9 @@ typedef unsigned short u16;
 #define TOKEN 0x5a34f00eu
 #define INITIAL 0xa5cb0ff1u
 #define LIMIT 100000u
+#ifndef FE_OBSERVE_HELD
+#define FE_OBSERVE_HELD 0
+#endif
 
 /* PE32 export lookup, fixed Xbox kernel base; every computed read stays
  * within a validated <=16MiB image span. No export-name/string traversal.
@@ -56,6 +59,21 @@ u32 fe_fence_probe(void) {
     WORD(FE_CONTROL)=1u;
     WORD(FE_ADDRESS)=address;
     WORD(FE_DATA)=TOKEN;
+    u32 early=0u,invalid_held=0u;
+#if FE_OBSERVE_HELD
+    /* Distinct follow-up experiment: actual RAM reads while bit0 is still 1.
+     * Positive visibility proves this bit is not an absolute idle-data gate;
+     * absence across a finite sample is not proof of permanent blocking.
+     */
+    u32 held_before=WORD(FE_CONTROL),held=INITIAL;
+    for (u32 i=0u;i<1000u;++i) {
+        held=scratch[0];
+        if (held!=INITIAL) break;
+    }
+    early=held==TOKEN ? 0x00800000u : 0u;
+    u32 held_after=WORD(FE_CONTROL);
+    invalid_held=(held!=INITIAL && held!=TOKEN) || held_before!=1u || held_after!=1u;
+#endif
     WORD(FE_CONTROL)=0u;
     u32 polls;
     for (polls=1u;polls<=LIMIT;++polls) {
@@ -70,6 +88,6 @@ u32 fe_fence_probe(void) {
      */
     WORD(FE_CONTROL)=control|1u;
     if (control!=0u || WORD(FE_CONTROL)!=1u) return 0xfa000006u;
-    if (last!=TOKEN || polls>LIMIT) return 0xf2000000u | (polls&0x1ffffu);
-    return 0xf1000000u | polls;
+    if (last!=TOKEN || polls>LIMIT || invalid_held) return 0xf2000000u | (polls&0x1ffffu);
+    return 0xf1000000u | early | polls;
 }
