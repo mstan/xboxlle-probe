@@ -102,12 +102,15 @@ The preserved `6277102` generation stopped before the blanket engine-enable
 request. The current private SDK copy replaces that one request with the bounded
 owner below, then executes the original PLL calculation and adapted timer
 producer. Actual offline execution reaches four validated/pinned/zeroed
-allocations, the real event, eleven checked stores, and the actual query-only
-instance-memory API with five-page pinning and post-pin verification. It stops
-**before** `RAMHT FD002210=03000100` in the nominal owned fixture. That request
-has no store or corresponding readback. The queried reservation remains intact;
-there are no RAMFC or PRAMIN writes. The successful SDK-return certificate has
-not been produced, so `noise_gpu_capture` refuses work.
+allocations, the real event, thirteen checked stores, and the actual query-only
+instance-memory API with five-page pinning and post-pin verification. It then
+selects the documented RAMHT fields only while the real consumers are idle. It
+stops **before** `RAMFC FD002214=00890110` in the nominal owned fixture. That
+request has no store or corresponding readback. The queried reservation remains
+intact; there are no RAMFC or PRAMIN writes. The successful SDK-return certificate
+has not been produced, so `noise_gpu_capture` refuses work. The preserved
+`fc749eb` generation stopped at RAMHT after eleven stores; its proof and source
+snapshots retain that earlier scope.
 
 ## Bounded engine, timer and instance contract
 
@@ -163,20 +166,83 @@ clock route to be established and the standing console stop to be cleared.
 The private source proof does not qualify counter width, rollover cadence or
 silicon converter phase.
 
+The RAMHT continuation preserves every observed field outside the documented
+NV2A address/size/search fields. It selects the original query's page-aligned
+padding, a 4 KiB table and a 128-entry search; the nominal encoding is
+`03000100`. Selection requires an enabled PFIFO and quiet PMC/PGRAPH/FIFO sources,
+disabled cache push/pull access, idle hashing, DMA and semaphore acquisition,
+clear semaphore errors, disabled reassignment,
+empty cache/runout status and matching PUT/GET pointers. A busy consumer stops
+before any control change. The owner then masks PMC with its own immediate
+readback, rechecks that idle context and the entire prior RAMHT word, publishes
+the selection and compares the entire immediate word. It checks the idle
+context again and leaves interrupts masked at the following guard. It never
+disables consumers or resets/acknowledges them to create that state. CPU flags
+are restored on every guarded transaction failure.
+
+This configures documented control fields without admitting a lookup, context
+load or RAMIN consumer. The RAMHT table is not filled, the physical aperture
+mapping is not established, and preserved unknown fields are not declared
+inert. No background provider supplies a successful SDK return or ready state.
+
 The remaining downstream requirements stay guarded:
 
 - `MmClaimGpuInstanceMemory(UINT_MAX, &padding)` is the original query-only
   producer, now actually reached. Its CPU mapping/protection/physical pages and
   endpoint are validated, pinned and reverified. No resize or freeing occurs.
-  The SDK uses its top, padding and five-page reservation to place RAMHT/RAMFC
-  and clear PRAMIN. CPU page ownership must not be treated as an
-  already qualified aperture alias. The primary NV4 RAMIN documentation is
-  unfinished, and the retained original owner also keeps physical alias
-  equivalence explicit. No PRAMIN write admission is currently present.
+  A bounded private execution of the captured original export and complete body
+  inspection confirms that `UINT_MAX` writes padding `10000` and returns top
+  `83FF0000` without changing the existing 64 KiB reservation. Its sixteen CPU
+  pages have contiguous physical provenance and protection `204` (read/write
+  with write combining). This is a query, not an exclusive new allocation.
+  In the pinned SDK, the returned CPU pointer is checked and reduced by five
+  pages, then never used again. All RAMHT/RAMFC placement and clearing instead
+  use PRAMIN plus the returned padding. These producers do not prove that the
+  two addresses are the same physical storage. The primary NV4 RAMIN mapping
+  documentation is unfinished, and the retained original owner also keeps
+  alias equivalence explicit. No PRAMIN write admission is currently present.
 - Primary RAMHT fields establish its address/search encoding. The SDK's RAMFC
-  value includes fields still named `UNK17` in the primary reference, with a
-  differing initialization comment. A context latch with guessed masks would
-  not establish context loading or safe physical ownership.
+  value decodes to `UNK17=44` using the primary field layout, whose initialization
+  comment says `45`. The SDK itself records both its calculated `00890110`
+  and a different observed `008A0110`. Those comments establish neither the
+  field's meaning nor context-loading behavior. This entire next write stays
+  guarded; accepting only its known address bits would not make it safe.
+
+## Prepared instance-alias comparison and unmet preconditions
+
+There is no compiled marker command or live runner. A future bounded comparison
+needs a proved exclusive instance-memory owner and CPU-store permission before
+any marker store. The query above, IRQ exclusivity and pinned pages do not alone
+exclude another foreground user of the kernel's existing reservation.
+
+The primary `NV10_PFB.PRAMIN_WR_PROT` at `FD100214` adds a separate restriction:
+when ENABLE is set, writes to the final `(MASK+1)*10000` bytes of VRAM are
+ignored unless they go through PRAMIN. CPU page protection `204` does not bypass
+that GPU restriction. The original SDK later clears ENABLE, after the currently
+guarded RAMFC request. This diagnostic admits no such protection transition.
+Any future CPU-marker phase requires independently established writable
+ownership and an already compatible, reverified protection state; it must stop
+if those preconditions are absent.
+
+Once those ownership facts are supported and a separate phase is reviewed,
+the smallest useful comparison would retain the actual query's top, padding,
+page/endpoint/protection/pin provenance and the quiet consumer context, record
+all baseline words, and derive candidate aperture addresses from the original
+producer without truncating or masking a pointer. It would choose distinct
+markers for fixed first/last words of the five pages, perform CPU stores only
+within the exclusive proved reservation, order them with a CPU store fence,
+and check every immediate CPU readback. Bounded passive aperture reads would
+then distinguish a matching alias from a nonmatching observation. CPU originals
+would be restored with immediate readback only after an ordinary completed
+observation and while ownership remains valid. An unexpected write result
+stops at that result, makes no automatic recovery/restore operation, and retains
+all pages and evidence. A mismatching passive read is evidence, not permission
+to try another offset or PRAMIN write. Several matching words would qualify only
+those measured locations, not a full aperture mapping or a noise algorithm.
+
+No preparation here authorizes that operation. Current missing dependencies are
+the exclusive reservation contract, existing CPU-store permission and the RAMFC
+context semantics, before physical alias calibration and capture can follow.
 
 Any later self-clearing, W1C, indirect-selector or reset effect needs its actual
 contract. The existing console stop remains in force until the owner confirms
@@ -224,7 +290,7 @@ produce readiness. The optional `--prior-image` observation reuses the preserved
 pre-fix executable once and retains its exact failing access and identities;
 ordinary test discovery does not require that private prior image.
 
-The current engine/timer/instance generation exercises nine groups and 79
+The preserved `fc749eb` engine/timer/instance generation exercises nine groups and 79
 complete command lifetimes, plus one independent elapsed-alarm check. Actual
 target cases include a real PFIFO enable and an already enabled retained state;
 missing required engines rejected before any GPU store; changed enable context
@@ -239,6 +305,30 @@ counter/alarm state; repeated status/time reads are passive. Fractional phase at
 a ratio change is an explicit nominal model choice, not a silicon claim. The
 ordinary compiled SDK caller, actual allocator/IRQ/event/query ABI and retained
 resources remain the execution path throughout.
+
+The current instance selection generation exercises ten groups and 97 complete
+command lifetimes, including eighteen added RAMHT ownership cases. Its independent
+provider decodes address, table size and search count from the pinned primary
+XML rather than the C mask. It supplies actual empty/disabled FIFO consumers,
+then exercises retained unknown-field sentinels; reassignment, cache access,
+hash/DMA/semaphore acquisition activity, nonempty cache and unmatched runout pointers; a context change
+after masking; drift of the prior table word; ignored mask/address/size/search
+effects; changed unknown-field readback; and a real pending FIFO source after
+publication, plus an actual failing ISR after the successful RAMHT publication.
+The post-publication context check runs before CPU flags are restored, so that
+ISR cannot fail and then be followed by unguarded foreground reads.
+Unexpected write readback is the last hardware operation; no
+RAMFC/PRAMIN access or later kernel work follows, resources remain retained, and
+subsequent bootstrap/capture entries do no work. Every completed foreground
+case checks restoration of the original CPU interrupt flag. The coherent batch
+also retains the earlier allocator, IRQ, PCI, engine and timer cases against
+the current actual linked initializer, plus the independent elapsed/alarm case.
+The initial RAMHT generation and its 94-case report are retained separately.
+Executing that exact earlier PE with an ISR delivered at its actual exposed
+post-check entry reproduces two foreground register reads after the ISR's
+unexpected mask readback. The corrected generation runs the post-check with IF
+clear and stops after the failing ISR readback. This is a causal compiled-owner
+failure and correction, not a physical console failure.
 
 These cases qualify the software owner and supported prefix. They provide no
 silicon reset, physical selector, raster, tiled readback or noise algorithm oracle.
@@ -262,3 +352,9 @@ The byte exceptions additionally bind the primary
 [VGA register groups](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/rnndb/display/nv_vga.xml)
 and their PRMVIO/PRMCIO/PRMDIO placement. The independent model reads those XML
 width definitions instead of using the C guard's switch as its oracle.
+Instance selection additionally binds the primary
+[FIFO consumer and context ownership](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/docs/hw/fifo/intro.rst),
+[puller/hash-table use](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/docs/hw/fifo/puller.rst)
+and [PRAMIN write protection](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/rnndb/memory/nv10_pfb.xml).
+The original query body, reserved-page addresses and byte snapshots stay private;
+the public source contains no captured kernel bytes.

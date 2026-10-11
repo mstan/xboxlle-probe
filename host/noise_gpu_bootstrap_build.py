@@ -68,6 +68,8 @@ def bounded_sdk(sdk=SDK):
                   '    VIDEOREG(NV_PTIMER_DENOMINATOR)=7629;\n\n'
                   '    VIDEOREG(NV_PTIMER_ALARM_0)=0xFFFFFFFF;',
               'noise_boot_timer_setup(); /* real ratio/compare producer, board-counter deadline */')
+    text=once(text,'VIDEOREG(NV_PFIFO_RAMHT)=((baseaddr>>8)&NV_PFIFO_RAMHT_BASE_ADDRESS)|NV_PFIFO_RAMHT_SEARCH_128;',
+              'noise_boot_hash_setup(baseaddr); /* idle selection only, no alias/consumer admission */')
     text=once(text,'if (pb_install_gpu_interrupt()==0)\n    {',
               'if (pb_install_gpu_interrupt()==0)\n    {\n        noise_boot_abort(11);')
     text=once(text,'pb_running=1;','pb_running=1;\n    noise_boot_dpc_ready();')
@@ -250,6 +252,7 @@ def build(output,sdk=SDK,xbe=True):
                    'rnndb/display/nv3_prmvio.xml','rnndb/display/nv3_pcrtc.xml',
                    'rnndb/display/nv3_pramdac.xml']
     primary_names += ['docs/hw/pm/nv1-clock.rst']
+    primary_names += ['rnndb/memory/nv10_pfb.xml','docs/hw/fifo/puller.rst','docs/hw/fifo/intro.rst']
     primary_inputs=[dict(path=str(PRIMARY/name),sha256=digest(PRIMARY/name),
                        url=f'https://github.com/envytools/envytools/blob/{PRIMARY_PIN}/{name}')
                     for name in primary_names]

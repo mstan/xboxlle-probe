@@ -51,6 +51,42 @@ WIDTH_CASES={
 }
 class Bar0WidthError(AssertionError):pass
 
+class HashSelection:
+    """Passive register configuration only; never a RAMIN/lookup producer.
+
+    Decode the primary field definitions independently of the C masks. Unknown
+    fields retain sentinels and remain observable; their effect is not modeled.
+    """
+    def __init__(self):
+        register=ET.parse(PRIMARY/'rnndb/fifo/nv4_pfifo.xml').find(f'.//{NS}reg32[@name="RAMHT"]')
+        self.fields={field.attrib['name']:field for field in register.findall(NS+'bitfield')
+                     if field.attrib['name'] in ['ADDRESS','SIZE','SEARCH']}
+        self.value=0x02020180 # Existing base 18000, 16K table, search 64
+        self.publications=[]
+
+    def mask(self,name):
+        field=self.fields[name];lo=int(field.attrib['low']);hi=int(field.attrib['high'])
+        return ((1<<(hi-lo+1))-1)<<lo
+
+    def decode(self):
+        decoded={}
+        for name,field in self.fields.items():
+            raw=(self.value&self.mask(name))>>int(field.attrib['low'])
+            if name=='ADDRESS':decoded[name]=raw<<int(field.attrib['shr'])
+            else:decoded[name]=int(next(v.attrib['name'].rstrip('K') for v in field.findall(NS+'value')
+                                       if int(v.attrib['value'],0)==raw))*(1024 if name=='SIZE' else 1)
+        return decoded
+
+    def publish(self,value,fault):
+        known=sum(self.mask(name) for name in self.fields)
+        assert value&~known==self.value&~known
+        old=self.value;self.value=value
+        if fault=='hash-address-readback':self.value=(value&~self.mask('ADDRESS'))|(old&self.mask('ADDRESS'))
+        if fault=='hash-size-readback':self.value=(value&~self.mask('SIZE'))|(old&self.mask('SIZE'))
+        if fault=='hash-search-readback':self.value=(value&~self.mask('SEARCH'))|(old&self.mask('SEARCH'))
+        if fault=='hash-unknown-readback':self.value^=1<<30
+        self.publications.append(dict(before=old,requested=value,observed=self.value,decoded=self.decode()))
+
 class Timer:
     """Independent nominal elapsed producer, not reads/polls as completion.
 
@@ -138,6 +174,16 @@ class Machine:
         if fault=='timer-stopped':self.timer.mul&=~0xffff
         if fault=='timer-alarm-pending':self.timer.pending=1
         self.instance=None
+        self.hash=HashSelection();self.hash_reads=0;self.hash_mask_written=False
+        if fault=='hash-unknown-retained':self.hash.value|=0x40000004
+        # Actual empty/disabled consumers, rather than a caller ready flag.
+        for address in [0xfd002400,0xfd003014,0xfd003214]:self.set(address,0x10)
+        fifo_faults={'hash-reassign':(0xfd002500,1),'hash-cache-access':(0xfd003000,1),
+                     'hash-hash-busy':(0xfd003250,0x1000),'hash-dma-busy':(0xfd003220,0x10),
+                     'hash-cache-not-empty':(0xfd003014,0),'hash-runout-pending':(0xfd002410,4),
+                     'hash-acquire-busy':(0xfd003250,0x10000),
+                     'hash-acquire-active':(0xfd003254,0x10)}
+        if fault in fifo_faults:self.set(*fifo_faults[fault])
         self.set(0xfd680500,0x00011c01) # Actual SDK M=1,N=28,P=1 -> 233333324 Hz
         if fault=='pll-zero':self.set(0xfd680500,0)
         if fault=='pll-rate':self.set(0xfd680500,0x00011b01)
@@ -160,6 +206,9 @@ class Machine:
         self.uc.hook_add(UC_HOOK_CODE,self.poll_hook,begin=poll,end=poll)
         self.uc.hook_add(UC_HOOK_MEM_READ,self.mmio_read,begin=0xfd000000,end=0xfdffffff)
         self.uc.hook_add(UC_HOOK_MEM_WRITE,self.mmio_write,begin=0xfd000000,end=0xfdffffff)
+        if fault=='irq-after-hash':
+            boundary=self.symbols['_noise_idle_fifo']
+            self.uc.hook_add(UC_HOOK_CODE,self.foreground_irq_hook,begin=boundary,end=boundary)
         entry=self.symbols['_noise_boot_bus_master']
         self.uc.hook_add(UC_HOOK_CODE,self.width_hook,begin=entry,end=entry)
 
@@ -286,6 +335,13 @@ class Machine:
         if address==0xfd000140 and self.fault=='irq-after-command' and self.injected:self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-during-allocation' and self.injected:self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-after-timer' and self.injected:self.set(address,1)
+        if address==0xfd000140 and self.fault=='irq-after-hash' and self.injected:self.set(address,1)
+        if address==0xfd000140 and self.fault=='hash-mask-readback' and self.hash_mask_written:self.set(address,1)
+        if address==0xfd002210:
+            assert self.engine_enable&0x100
+            self.hash_reads+=1
+            if self.fault=='hash-context-drift' and self.hash_reads==2:self.hash.value^=0x10
+            self.set(address,self.hash.value)
         if address==0xfd001804:
             self.command_reads+=1
             if self.fault=='command-drift' and self.command_reads==2:self.pci_command^=2
@@ -330,6 +386,15 @@ class Machine:
             self.engine_written=True
             if self.fault!='engine-readback':self.engine_enable=value
             if self.fault=='engine-unknown-readback':self.engine_enable^=0x20000000
+        elif address==0xfd000140 and value==0 and self.instance:
+            self.hash_mask_written=True
+            if self.fault=='hash-recheck-busy':self.set(0xfd003220,0x10)
+        elif address==0xfd002210:
+            assert self.get(0xfd000140)==0
+            self.hash.publish(value,self.fault)
+            assert self.hash.publications[-1]['decoded']==dict(ADDRESS=0x10000,SIZE=4096,SEARCH=128) or self.fault.endswith('readback')
+            if self.fault=='hash-output-pending':self.set(0xfd002100,1)
+            if self.fault=='irq-after-hash':self.inject=True
         elif address in [0xfd009140,0xfd009200,0xfd009210,0xfd009420,0xfd009100]:
             self.timer_writes.append([address,value])
             fault={0xfd009200:'timer-div-readback',0xfd009210:'timer-mul-readback',
@@ -353,6 +418,12 @@ class Machine:
     def poll_hook(self,uc,address,size,data):
         if self.inject and not self.injected and (uc.reg_read(UC_X86_REG_EFLAGS)&0x200):
             uc.emu_stop()
+
+    def foreground_irq_hook(self,uc,address,size,data):
+        # Deliver at the actual post-check entry if CPU interrupts are exposed.
+        # The corrected owner keeps IF clear here; normal delivery then occurs
+        # at the following real poll. This catches unguarded post-check reads.
+        if self.inject and not self.injected and (uc.reg_read(UC_X86_REG_EFLAGS)&0x200):uc.emu_stop()
 
     def drive(self,address):
         for _ in range(4):
@@ -422,6 +493,8 @@ class BootstrapTests(unittest.TestCase):
         machine=Machine(fault);result=machine.call('noise_gpu_bootstrap')
         self.assertEqual(result,status,fault)
         state=machine.result();self.assertEqual(state[2],status)
+        finished_flags=machine.uc.reg_read(UC_X86_REG_EFLAGS)
+        self.assertTrue(finished_flags&0x200,'foreground guard must restore original CPU interrupt flag')
         if retained is not None:self.assertEqual(state[7],retained)
         stores=[x for x in machine.mmio if x[0]=='write']
         if writes is not None:self.assertEqual(len(stores),writes)
@@ -436,14 +509,15 @@ class BootstrapTests(unittest.TestCase):
                             mmio=machine.mmio,kernel_calls=machine.kernel_calls,
                             pins=machine.pins,allocations=machine.allocations,
                             engine_changes=machine.engine_changes,timer_writes=machine.timer_writes,
+                            hash_publications=machine.hash.publications,finished_cpu_flags=finished_flags,
                             timer=dict(elapsed_acpi_ticks=machine.timer.elapsed,counter=machine.timer.count,
                                        pending=machine.timer.pending,mask=machine.timer.mask),instance=machine.instance))
         return machine
 
     def test_genuine_sdk_prefix_and_guard(self):
-        machine=self.check('',14,4,11)
+        machine=self.check('',14,4,13)
         state=machine.result()
-        self.assertEqual(state[8:10],[0xfd002210,0x03000100])
+        self.assertEqual(state[8:10],[0xfd002214,0x00890110])
         self.assertEqual(state[22:24],[0,0]) # unsupported store and readback NOT performed
         self.assertEqual(machine.get(0xfd001804),0xf9000007)
         self.assertEqual(len(machine.pins),5)
@@ -452,14 +526,16 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(machine.get(0xfd001830),0xf0000000) # never clears/moves the address
         self.assertEqual(machine.get(0xfd00180c),0x8780f800) # no header/BIST write
         stores=[x for x in machine.mmio if x[0]=='write']
-        self.assertEqual(stores[-3:],[['write',0xfd009200,4,0xbeefde88],
+        self.assertEqual(stores[-5:],[['write',0xfd009200,4,0xbeefde88],
                                     ['write',0xfd009210,4,0xcafe1dcd],
-                                    ['write',0xfd009420,4,0xffffffff]])
+                                    ['write',0xfd009420,4,0xffffffff],
+                                    ['write',0xfd000140,4,0],
+                                    ['write',0xfd002210,4,0x03000100]])
         self.assertTrue(all(x[2]==4 for x in stores))
         self.assertEqual(machine.engine_changes,[dict(before=0xa5113001,requested=0xa5113101,changed=0x100)])
         self.assertEqual([x for x in machine.mmio if x[1]==0xfd680500],
                          [['read',0xfd680500,4,0x11c01]]*7)
-        self.assertFalse(any(x[1] in [0xfd002210,0xfd002214] for x in machine.mmio))
+        self.assertFalse(any(x[1]==0xfd002214 or x[1]>=0xfd700000 for x in machine.mmio))
         self.assertEqual(machine.instance,dict(top=0x83ff0000,start=0x83feb000,physical=0x03feb000,padding=0x10000))
         self.assertEqual(machine.pins[-1],[0x83feb000,0x5000])
         self.assertEqual(machine.uc.mem_read(0x83feb000,0x5000),b'\x5a'*0x5000) # No guessed PRAMIN alias/store
@@ -471,7 +547,7 @@ class BootstrapTests(unittest.TestCase):
                              ('stack',4),('zero-page',22),('busy',9),('irq-busy',11)]:
             with self.subTest(fault=fault):self.check(fault,status,0,0)
         self.check('mask-readback',12,0,1)
-        self.check('concurrent-bootstrap',14,4,11)
+        self.check('concurrent-bootstrap',14,4,13)
 
     def test_pci_effect_readback_and_ownership(self):
         machine=self.check('command-readback',12,4,2)
@@ -481,7 +557,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(machine.result()[8:10],[0xfd001804,7])
         self.assertEqual(machine.result()[22:24],[0,0])
         self.assertFalse(any(x[0]=='write' and x[1]==0xfd001804 for x in machine.mmio))
-        machine=self.check('rom-disabled',14,4,11)
+        machine=self.check('rom-disabled',14,4,13)
         self.assertEqual(machine.get(0xfd001830),0xf0000000)
         for fault in ['pci-header','pci-bist']:
             with self.subTest(fault=fault):
@@ -520,7 +596,7 @@ class BootstrapTests(unittest.TestCase):
         for fault,(kind,address,status) in WIDTH_CASES.items():
             with self.subTest(fault=fault):
                 positive=fault in ['width-vio-byte','width-cio-byte','width-dio-byte']
-                machine=self.check(fault,status,4,11 if positive else 1)
+                machine=self.check(fault,status,4,13 if positive else 1)
                 self.assertTrue(machine.width_injected)
                 self.assertIsNone(machine.width_violation) # guard precedes provider
                 if not positive:
@@ -531,7 +607,7 @@ class BootstrapTests(unittest.TestCase):
                     self.assertIn(['read',address,1,0x5a],machine.mmio)
 
     def test_irq_failure_has_no_following_operation(self):
-        for fault in ['irq-in-connect','irq-after-command','irq-during-allocation','irq-after-timer']:
+        for fault in ['irq-in-connect','irq-after-command','irq-during-allocation','irq-after-timer','irq-after-hash']:
             machine=self.check(fault,12)
             self.assertTrue(machine.injected)
             self.assertEqual(machine.mmio[-2:], [['write',0xfd000140,4,0],['read',0xfd000140,4,1]])
@@ -544,12 +620,15 @@ class BootstrapTests(unittest.TestCase):
             if fault=='irq-after-timer':
                 self.assertFalse(any(x[0]=='write' and x[1] in [0xfd009210,0xfd009420] for x in machine.mmio))
                 self.assertIsNone(machine.instance)
+            if fault=='irq-after-hash':
+                self.assertEqual(len(machine.hash.publications),1)
+                self.assertFalse(any(x[1]==0xfd002214 for x in machine.mmio))
         machine=self.check('irq-pending',32,4,7)
         self.assertEqual(machine.result()[6],1)
         self.assertEqual(machine.result()[15],0) # real ready producer not reached
 
     def test_documented_engine_enable_and_retained_state(self):
-        machine=self.check('engine-fifo-enabled',14,4,11)
+        machine=self.check('engine-fifo-enabled',14,4,13)
         self.assertEqual(machine.engine_changes,[dict(before=0xa5113101,requested=0xa5113101,changed=0)])
         for fault in ['engine-graph-disabled','engine-timer-disabled','engine-fb-disabled','engine-crtc-disabled']:
             with self.subTest(fault=fault):
@@ -594,7 +673,7 @@ class BootstrapTests(unittest.TestCase):
         self.check('timer-status',33,4,11)
         for fault in ['timer-stopped','timer-alarm-pending']:
             with self.subTest(fault=fault):
-                machine=self.check(fault,14,4,11)
+                machine=self.check(fault,14,4,13)
                 self.assertEqual(machine.timer.div&0xffff,56968)
                 self.assertEqual(machine.timer.mul&0xffff,7629)
                 self.assertEqual(machine.timer.alarm,0xffffffe0)
@@ -606,6 +685,39 @@ class BootstrapTests(unittest.TestCase):
             with self.subTest(fault=fault):
                 machine=self.check(fault,23,4,11)
                 self.assertFalse(any(x[1]>=0xfd700000 for x in machine.mmio))
+
+    def test_idle_hash_selection_and_fail_stop(self):
+        machine=self.check('hash-unknown-retained',14,4,13)
+        self.assertEqual(machine.hash.value,0x43000104)
+        self.assertEqual(machine.hash.decode(),dict(ADDRESS=0x10000,SIZE=4096,SEARCH=128))
+        self.assertEqual(len(machine.hash.publications),1)
+        self.assertEqual(machine.get(0xfd000140),0)
+        for fault in ['hash-reassign','hash-cache-access','hash-hash-busy','hash-dma-busy',
+                      'hash-cache-not-empty','hash-runout-pending','hash-acquire-busy','hash-acquire-active']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,34,4,11)
+                self.assertEqual(machine.hash.publications,[])
+                self.assertEqual(machine.get(0xfd000140),1) # no control change on a busy owner
+        for fault in ['hash-recheck-busy','hash-context-drift']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,34,4,12)
+                self.assertEqual(machine.hash.publications,[])
+                self.assertEqual(machine.get(0xfd000140),0)
+        machine=self.check('hash-mask-readback',12,4,12)
+        self.assertEqual(machine.mmio[-2:],[['write',0xfd000140,4,0],['read',0xfd000140,4,1]])
+        self.assertEqual(machine.result()[8:11],[0xfd000140,0,1])
+        self.assertEqual(machine.hash.publications,[])
+        for fault in ['hash-address-readback','hash-size-readback','hash-search-readback','hash-unknown-readback']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,12,4,13)
+                self.assertEqual(machine.mmio[-2][0:3],['write',0xfd002210,4])
+                self.assertEqual(machine.mmio[-1][0:3],['read',0xfd002210,4])
+                self.assertEqual(machine.result()[22:24],[1,1])
+                self.assertFalse(any(x[1]==0xfd002214 for x in machine.mmio))
+        machine=self.check('hash-output-pending',34,4,13)
+        self.assertEqual(machine.mmio[-1],['read',0xfd002100,4,1])
+        self.assertEqual(len(machine.hash.publications),1)
+        self.assertFalse(any(x[1]>=0xfd700000 for x in machine.mmio))
 
     def test_independent_timer_elapsed_alarm_and_passive_reads(self):
         timer=Timer();timer.write(0xfd009200,56968);timer.write(0xfd009210,7629)

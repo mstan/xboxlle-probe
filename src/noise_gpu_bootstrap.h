@@ -27,6 +27,7 @@ void noise_boot_bus_master(void);
 void noise_boot_pci_setup(void);
 void noise_boot_engine_setup(void);
 void noise_boot_timer_setup(void);
+void noise_boot_hash_setup(uint32_t);
 void noise_boot_wbinvd(void);
 PVOID NTAPI noise_boot_allocate(SIZE_T, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG);
 PVOID NTAPI noise_boot_instance(SIZE_T, SIZE_T *);

@@ -14,6 +14,9 @@ static void *noise_unwind[5];
 static int noise_active, noise_servicing, noise_dpc_ready;
 static uint64_t noise_frequency, noise_previous, noise_deadline;
 static int noise_instance_queried;
+static uint32_t noise_instance_padding;
+static int noise_hash_preparing;
+static uint32_t noise_hash_value,noise_hash_previous;
 static int noise_zero_owned;
 static int noise_timer_preparing;
 static unsigned noise_timer_stage;
@@ -180,6 +183,28 @@ static uint32_t noise_read_mmio(uintptr_t address,unsigned bytes) {
     noise_flags(flags);
     return value;
 }
+static int noise_idle_fifo(uint32_t interrupt_enable) {
+    uint32_t enabled=noise_raw_read(0xfd000200);
+    if((enabled&NOISE_EXISTING_ENGINES)!=NOISE_EXISTING_ENGINES ||
+       !(enabled&0x100) || noise_raw_read(0xfd000140)!=interrupt_enable ||
+       noise_raw_read(0xfd000100) || noise_raw_read(0xfd400700) ||
+       noise_raw_read(0xfd400108)) return 0;
+    /* Primary defined status/ACCESS fields; no disable, reset, acknowledgement
+     * or wait loop creates this quiescent state on the caller's behalf.
+     */
+    if(noise_raw_read(0xfd002100) || (noise_raw_read(0xfd002500)&0x11) ||
+       (noise_raw_read(0xfd003000)&1) || (noise_raw_read(0xfd003050)&0x1111) ||
+       (noise_raw_read(0xfd003200)&1) || (noise_raw_read(0xfd003250)&0xf11111) ||
+       (noise_raw_read(0xfd003254)&0x10) ||
+       (noise_raw_read(0xfd003220)&0x11) ||
+       (noise_raw_read(0xfd002400)&0x111)!=0x10 ||
+       (noise_raw_read(0xfd003014)&0x111)!=0x10 ||
+       (noise_raw_read(0xfd003214)&0x111)!=0x10 ||
+       noise_raw_read(0xfd002410)!=noise_raw_read(0xfd002420) ||
+       noise_raw_read(0xfd003010)!=noise_raw_read(0xfd003070) ||
+       noise_raw_read(0xfd003210)!=noise_raw_read(0xfd003270)) return 0;
+    return 1;
+}
 static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     noise_boot_poll();
     noise_gpu_bootstrap_result.last_address=(uint32_t)address;
@@ -201,6 +226,7 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     if(bytes==4 && address==0xfd001830 && !(value&1)) mask=0xffffffffu;
     if(bytes==4 && address==0xfd00180c && (value&0xffff)==0xf800) mask=0xffffffffu;
     if(bytes==4 && address==0xfd000200) mask=0xffffffffu;
+    if(bytes==4 && address==0xfd002210 && noise_hash_preparing && value==noise_hash_value) mask=0xffffffffu;
     if(bytes==4 && noise_timer_preparing) {
         if(address==0xfd009200 && !noise_timer_stage && (value&0xffff)==56968) mask=0xffff;
         if(address==0xfd009210 && noise_timer_stage==1 && (value&0xffff)==7629) mask=0xffff;
@@ -209,6 +235,28 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     if(!mask) noise_boot_abort(14);
     uint32_t flags=noise_cli();
     if(noise_gpu_bootstrap_result.status) { noise_flags(flags); noise_boot_abort(12); }
+    if(address==0xfd002210) {
+        /* RAMHT selection requires all documented consumers to be idle.
+         * It does not prove RAMIN backing or qualify a lookup/context load.
+         */
+        if(!noise_idle_fifo(1)) { noise_flags(flags); noise_boot_abort(34); }
+        noise_raw_store(0xfd000140,0);
+        uint32_t observed=noise_raw_read(0xfd000140);
+        noise_gpu_bootstrap_result.observed=observed;
+        noise_gpu_bootstrap_result.last_observed_valid=1;
+        if(observed) { noise_record_failure(12); noise_flags(flags); noise_boot_abort(12); }
+        /* This mask store is a separately observed ownership effect. */
+        if(!noise_idle_fifo(0)) { noise_flags(flags); noise_boot_abort(34); }
+        uint32_t before=noise_raw_read(0xfd002210);
+        if(before!=noise_hash_previous ||
+           value!=((before&~0x030301f0u)|0x03000000u|((noise_instance_padding>>8)&0x1f0u))) {
+            noise_flags(flags); noise_boot_abort(34);
+        }
+        noise_gpu_bootstrap_result.last_address=(uint32_t)address;
+        noise_gpu_bootstrap_result.requested=value;
+        noise_gpu_bootstrap_result.last_effect_written=0;
+        noise_gpu_bootstrap_result.last_observed_valid=0;
+    }
     if(address==0xfd000200) {
         uint32_t before=noise_raw_read((uint32_t)address);
         if((before&NOISE_EXISTING_ENGINES)!=NOISE_EXISTING_ENGINES ||
@@ -258,8 +306,16 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     /* Unspecified ratio bits are preserved, never declared inert. */
     if((address==0xfd009200 || address==0xfd009210) && observed!=value) noise_record_failure(12);
     if(address==0xfd009420 && (observed&31)) noise_record_failure(12);
+    if(address==0xfd002210 && !noise_gpu_bootstrap_result.status && !noise_idle_fifo(0)) {
+        noise_flags(flags); noise_boot_abort(34);
+    }
     noise_flags(flags);
     if(noise_gpu_bootstrap_result.status) noise_boot_abort(12);
+    /* Hardware interrupts stay masked after RAMHT at the following unsupported
+     * RAMFC boundary. No command or table lookup is admitted by that selection.
+     * Its post-check ran before restoring CPU flags, so a failed ISR cannot be
+     * followed by unguarded foreground reads.
+     */
     if(address==0xfd009200) { noise_timer_div=observed; ++noise_timer_stage; }
     if(address==0xfd009210) { noise_timer_mul=observed; ++noise_timer_stage; }
     if(address==0xfd009420) ++noise_timer_stage;
@@ -389,6 +445,17 @@ void noise_boot_timer_setup(void) {
        noise_boot_load_i32((uint32_t *)0xfd000100)) noise_boot_abort(33);
     noise_timer_preparing=0;
 }
+void noise_boot_hash_setup(uint32_t padding) {
+    if(!noise_instance_queried || noise_hash_preparing || padding!=noise_instance_padding ||
+       (padding&4095) || padding>0x1f000) noise_boot_abort(34);
+    if(!(noise_boot_load_i32((uint32_t *)0xfd000200)&0x100)) noise_boot_abort(34);
+    uint32_t old=noise_boot_load_i32((uint32_t *)0xfd002210);
+    noise_hash_previous=old;
+    noise_hash_value=(old&~0x030301f0u)|0x03000000u|((padding>>8)&0x1f0u);
+    noise_hash_preparing=1;
+    noise_boot_store_i32((uint32_t *)0xfd002210,noise_hash_value);
+    noise_hash_preparing=0;
+}
 void noise_boot_wbinvd(void) {
     noise_boot_poll();
     if(!noise_zero_owned) noise_boot_abort(22);
@@ -474,6 +541,7 @@ PVOID NTAPI noise_boot_instance(SIZE_T request,SIZE_T *padding) {
      * All aperture writes stay guarded pending that independent owner proof.
      */
     noise_instance_queried=1;
+    noise_instance_padding=*padding;
     return top;
 }
 NTSTATUS NTAPI noise_boot_event(PHANDLE handle,POBJECT_ATTRIBUTES attributes,EVENT_TYPE type,BOOLEAN state) {
