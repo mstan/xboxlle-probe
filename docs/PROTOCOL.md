@@ -144,6 +144,12 @@ for bounded kernel mapping/physical-address queries and eight device reads.
 It performs zero device stores or inherited SG RAM loads; mapping is not
 allocation ownership and does not authorize a following RAM dereference.
 
+The [fixed RTC selector/data-alias observation](RTC-CONTEXT.md) uses existing
+ARM/EXEC for benign volatile selector writes and bounded reads, with zero CMOS
+data writes. Unexpected post-selection data stops before any further write.
+Its first physical attempt stopped inconclusively; it does not change the
+wire protocol or authorize an automatic retry.
+
 Errors are one-line strings beginning with `ERR`. Clients must treat unexpected replies,
 timeouts, short bulk transfers, and malformed JSON as failures. They must not retry hardware
 operations automatically.
