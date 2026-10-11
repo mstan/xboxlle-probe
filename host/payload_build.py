@@ -12,7 +12,8 @@ SOURCES = {'fe_fence': ('fe_fence_payload.c', 'fe_fence_probe'),
            'av_reverse': ('av_reverse_payload.c', 'av_reverse_probe'),
            'fp_activation': ('fp_activation_payload.c', 'fp_activation_probe'),
            'gp_boot': ('gp_boot_payload.c', 'gp_boot_probe'),
-           'gp_mapping': ('gp_mapping_payload.c', 'gp_mapping_probe')}
+           'gp_mapping': ('gp_mapping_payload.c', 'gp_mapping_probe'),
+           'fp_write_bank': ('fp_write_bank_payload.c', 'fp_write_bank_probe')}
 
 
 def compile_fixed(name, held_window=False, wait_window=False):
