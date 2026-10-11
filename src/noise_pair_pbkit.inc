@@ -43,6 +43,11 @@ int pb_noise_control(uint32_t value, uint32_t observed[2]) {
         VIDEOREG(NV_PGRAPH_RDI_INDEX)=index;
         if(VIDEOREG(NV_PGRAPH_RDI_INDEX)!=index) return pb_noise_fail(7);
         VIDEOREG(NV_PGRAPH_RDI_DATA)=value;
+        /* Both DATA directions advance. Check the write first, then reselect
+         * that same word; reading DATA immediately would read its neighbor. */
+        if(VIDEOREG(NV_PGRAPH_RDI_INDEX)!=index+4) return pb_noise_fail(9);
+        VIDEOREG(NV_PGRAPH_RDI_INDEX)=index;
+        if(VIDEOREG(NV_PGRAPH_RDI_INDEX)!=index) return pb_noise_fail(7);
         observed[bank]=VIDEOREG(NV_PGRAPH_RDI_DATA);
         if(observed[bank]!=value) return pb_noise_fail(8);
         if(VIDEOREG(NV_PGRAPH_RDI_INDEX)!=index+4) return pb_noise_fail(9);

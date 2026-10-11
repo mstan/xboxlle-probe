@@ -50,7 +50,8 @@ class Machine:
         self.uc.mem_write(0x81300000, struct.pack('<I', 0xcafebabe) * (640*480))
         self.hardware_fault = hardware_fault
         self.writes, self.reads, self.jobs = [], [], []
-        self.index, self.banks, self.cursor = 0, {}, 0x01200000
+        self.index, self.banks, self.cursor = 0, {0xe00054:0x51e0,0xdf000c:0x51df}, 0x01200000
+        self.selector_writes=0
         self.cache, self.gpu_registers, self.vertices = 0, {}, []
         self.draws, self.copies, self.expected_pixels = 0, 0, []
         self.read_occurrences = {}
@@ -83,6 +84,8 @@ class Machine:
         self.read_occurrences[address] = self.read_occurrences.get(address, 0)+1
         if address == INDEX:
             value = self.index ^ (4 if self.hardware_fault == 'index' else 0)
+            if self.hardware_fault=='reselect' and self.selector_writes==2:
+                value ^= 4
         elif address == DATA:
             value = self.banks.get(self.index, 0)
             if self.hardware_fault == 'data':
@@ -114,10 +117,12 @@ class Machine:
         assert size == 4
         self.writes.append((address, value))
         if address == INDEX:
+            self.selector_writes += 1
             self.index = value
         elif address == DATA:
             assert self.index in (0xe00050, 0xdf0008) and value in (0, 1)
             self.banks[self.index] = value
+            self.index += 8 if self.hardware_fault=='write-increment' else 4
         elif address == CACHE:
             assert value == 0x10000
             self.cache = value
@@ -173,7 +178,8 @@ class Machine:
                     for lane in (x,y,0,0x3f800000,u,v,0,0x3f800000)]
         assert self.vertices == expected
         expected_control = (0,1,1,0)[self.draws]
-        assert self.banks == {0xe00050: expected_control, 0xdf0008: expected_control}
+        assert self.banks == {0xe00050:expected_control,0xdf0008:expected_control,
+                              0xe00054:0x51e0,0xdf000c:0x51df}
         # Independent arbitrary producer, deliberately no noise/pixel equation.
         pixels = [0x80000000 | self.draws << 16 | p for p in range(64)]
         for row in range(8):
@@ -204,6 +210,7 @@ class Machine:
                             locks=self.word(self.symbols['model_locks']), jobs=len(self.jobs),
                             draws=self.draws, copies=self.copies, mmio_writes=self.writes,
                             mmio_reads=len(self.reads), completed=self.result()[3],
+                            observed_control_words=list(self.result()[8:20]),
                             result_sha256=hashlib.sha256(struct.pack('<276I', *self.result())).hexdigest()))
 
 
@@ -259,7 +266,8 @@ class CompiledCapture(unittest.TestCase):
                 m.record(f'owner/resource-{fault}',status)
 
     def test_unexpected_write_stops_before_following_operation(self):
-        for fault, expected, last in [('index',7,INDEX),('data',8,DATA),
+        for fault, expected, last in [('index',7,INDEX),('data',8,INDEX),
+                ('write-increment',9,DATA),('reselect',7,INDEX),
                 ('cache-bits',18,CACHE),('put',14,PUT)]:
             with self.subTest(fault=fault):
                 m=Machine(hardware_fault=fault)
@@ -271,6 +279,8 @@ class CompiledCapture(unittest.TestCase):
                     self.assertEqual(m.reads[-1],INDEX)
                 if fault=='data':
                     self.assertEqual(m.reads[-1],DATA)
+                if fault in ('write-increment','reselect'):
+                    self.assertEqual(m.reads[-1],INDEX)
                 before=(len(m.writes),len(m.reads),m.result())
                 self.assertEqual(m.call('noise_pair_capture'),expected)
                 self.assertEqual((len(m.writes),len(m.reads),m.result()),before)

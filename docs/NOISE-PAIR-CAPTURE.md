@@ -35,8 +35,12 @@ Push publication checks the owned linear ring capacity, physical continuity and
 current USER PUT/GET. Each cache flush and submitted GPU job is bounded by 50ms
 and 65536 reads. The actual PUT write is immediately read back; GET must remain
 aligned within the submitted range and reach its end with PGRAPH idle and no
-NSOURCE error. Each RDI selector/data write has an immediate expected readback;
-the DATA check occurs before another selector read or write. Unexpected values
+NSOURCE error. Each RDI selector write has an immediate expected readback. DATA
+writes and reads both advance the selector. After a DATA write, its resulting
+selector is checked first, then the intended word is explicitly reselected and
+that selector write is checked before reading DATA. A wrong DATA readback stops
+before any further selector operation. The required reselection is part of the
+fixed readback contract, not a recovery operation. Unexpected values
 or a timeout latch a failure and cause an immediate return without additional
 hardware operations, retry, cleanup, restore or fallback. A second capture call
 performs no work after entry or failure.
@@ -77,5 +81,10 @@ not authorize or perform any console operation.
 Primary source facts are the pinned [SDK owner, noise service and GPU bootstrap](https://github.com/XboxDev/nxdk/blob/29638d0b001f179b73c3513489af10ddc2986216/lib/pbkit/pbkit.c),
 its [class 39 method definitions](https://github.com/XboxDev/nxdk/blob/29638d0b001f179b73c3513489af10ddc2986216/lib/pbkit/nv_objects.h),
 and the primary [M2M input/output byte-increment fields](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/rnndb/graph/nv_m2mf.xml).
+The same primary project's [RDI load/dump routines](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/hwtest/pgraph_state.cc#L2201)
+stream successive DATA words after one selector in both transfer directions;
+the pinned SDK likewise writes fifteen DATA words after one selector at lines
+544–545. The offline producer advances on both directions and retains distinct
+adjacent-word sentinels to expose incorrect readback addressing.
 The retained original-driver page ownership is documented in
 [GPU-COMPLETION-LLE.md](https://github.com/mstan/xboxlle/blob/feat/blinx-audio-lle-20261009/pilots/native-title/GPU-COMPLETION-LLE.md).
