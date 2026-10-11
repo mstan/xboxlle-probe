@@ -71,6 +71,22 @@ halfword command adapter was corrected: normal PCI field widths do not establish
 narrow-access support through the PBUS MMIO alias. Primary BAR0 documentation
 requires aligned DWORD accesses outside the VGA aliases.
 
+Both load and store paths enforce that rule before touching BAR0. Byte access
+is exempt only at enumerated primary PRMVIO/PRMCIO/PRMDIO register aliases;
+halfword access, nearby undefined byte addresses, and DWORDs crossing those byte
+registers stop. The exception admits a documented width, not an otherwise
+unsupported VGA write effect, whole VGA memory window or second display head.
+
+The earlier `64261e2` generation and its frozen 25-case green report remain
+preserved. That report demonstrates owner/order/retention under its original
+model; **its permissive PBUS halfword-access assumption is superseded and is not
+primary-qualified MMIO behavior**. Executing its actual retained PE once against
+the corrected primary-derived BAR0 model causally rejects its first halfword
+read of `FD001804`, before any PCI command write. This is an offline model
+failure, not a physical observation. The corrected owner guards that access
+before the provider and uses aligned DWORD transactions for its actual SDK
+continuation.
+
 | PCI alias | Requested effect and readback |
 | --- | --- |
 | `FD001804` command/status | Preserve the observed command and set bus-master bit 2. Write **zero** to the upper STATUS half so no W1C flag is acknowledged. Compare the command half on immediate DWORD readback; read-only/sticky status remains separately observable. |
@@ -138,6 +154,7 @@ pixel observation.
 
 ```text
 python tests/test_noise_gpu_bootstrap.py --output <private-directory>
+python tests/test_noise_gpu_bootstrap.py --output <private-directory> --prior-image <retained-64261e2-PE-directory>
 python host/noise_gpu_bootstrap_build.py --output <private-directory>
 ```
 
@@ -158,9 +175,21 @@ It covers already-disabled ROM decode, incompatible/active header context,
 changed command/ROM/BIST context before publication, and ignored or changed
 command/ROM/cache/latency effects. The failing readback must be the last hardware
 operation; resources remain retained and later bootstrap/capture entries do no
-work. Five focused groups exercise 36 complete command lifetimes. The independent
+work. The PCI/owner cases exercise 36 complete command lifetimes. The independent
 PCI producer implements STATUS W1C and read-only header/BIST fields instead of
 treating the full configuration word as a latch.
+
+Six focused groups exercise 46 complete command lifetimes in the final width
+generation. Additional cases invoke the actual compiled owner API within a real
+active command, after original allocation/event/IRQ producers. Unsupported byte
+and halfword reads/writes fail before provider access, an undefined neighbor is
+guarded, a halfword over a VGA byte alias is guarded, and known VGA byte reads
+return independent fixture bytes before the unchanged SDK continuation resumes.
+A VGA byte write still stops before its unsupported effect. These authored API
+inputs test access ownership; they do not assert new original SDK behavior or
+produce readiness. The optional `--prior-image` observation reuses the preserved
+pre-fix executable once and retains its exact failing access and identities;
+ordinary test discovery does not require that private prior image.
 
 These cases qualify the software owner and supported prefix. They provide no
 silicon reset, physical selector, raster, tiled readback or noise algorithm oracle.
@@ -180,3 +209,7 @@ The PCI continuation additionally binds the pinned primary
 [timer fields and producers](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/docs/hw/bus/ptimer.rst),
 and [FIFO context fields](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/rnndb/fifo/nv4_pfifo.xml)
 by path and SHA-256 in the private target-builder report.
+The byte exceptions additionally bind the primary
+[VGA register groups](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/rnndb/display/nv_vga.xml)
+and their PRMVIO/PRMCIO/PRMDIO placement. The independent model reads those XML
+width definitions instead of using the C guard's switch as its oracle.

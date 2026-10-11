@@ -240,7 +240,9 @@ def build(output,sdk=SDK,xbe=True):
                    'rnndb/bus/ptimer.xml','rnndb/fifo/nv4_pfifo.xml',
                    'docs/hw/bus/bars.rst','docs/hw/bus/pmc.rst',
                    'docs/hw/bus/ptimer.rst','docs/hw/memory/nv4-vram.rst',
-                   'hwtest/pgraph_state.cc']
+                   'hwtest/pgraph_state.cc','rnndb/display/nv_vga.xml',
+                   'rnndb/display/nv3_prmvio.xml','rnndb/display/nv3_pcrtc.xml',
+                   'rnndb/display/nv3_pramdac.xml']
     primary_inputs=[dict(path=str(PRIMARY/name),sha256=digest(PRIMARY/name),
                        url=f'https://github.com/envytools/envytools/blob/{PRIMARY_PIN}/{name}')
                     for name in primary_names]

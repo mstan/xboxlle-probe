@@ -120,6 +120,28 @@ static int noise_mmio(uintptr_t address,unsigned bytes) {
     return address>=0xfd000000u && address<0xfe000000u &&
            address+bytes>=address && address+bytes<=0xfe000000u;
 }
+static int noise_vga_byte(uintptr_t address) {
+    /* Primary NV3:G80 PRMVIO, PRMCIO and PRMDIO byte-register aliases.
+     * No whole-window exemption, second-head assumption or PRMFB admission.
+     */
+    switch(address) {
+    case 0xfd0c03c2: case 0xfd0c03c3: case 0xfd0c03c4: case 0xfd0c03c5:
+    case 0xfd0c03cc: case 0xfd0c03ce: case 0xfd0c03cf:
+    case 0xfd6013b4: case 0xfd6013b5: case 0xfd6013ba: case 0xfd6013c0:
+    case 0xfd6013c1: case 0xfd6013c2: case 0xfd6013ca:
+    case 0xfd6013d4: case 0xfd6013d5: case 0xfd6013da:
+    case 0xfd6813c6: case 0xfd6813c7: case 0xfd6813c8: case 0xfd6813c9:
+        return 1;
+    default:return 0;
+    }
+}
+static int noise_mmio_width(uintptr_t address,unsigned bytes) {
+    if(bytes==1) return noise_vga_byte(address);
+    if(bytes!=4 || (address&3)) return 0;
+    /* A DWORD crossing defined VGA byte registers is not an ordinary register. */
+    for(unsigned i=0;i<4;++i) if(noise_vga_byte(address+i)) return 0;
+    return 1;
+}
 static void noise_cpu_store_guard(uintptr_t address,unsigned bytes) {
     if(address<0x80000000u) return; /* the diagnostic image's ordinary globals */
     if(address>=noise_gpu_bootstrap_result.stack_limit && address+bytes>=address &&
@@ -135,7 +157,12 @@ static void noise_cpu_store_guard(uintptr_t address,unsigned bytes) {
 }
 static uint32_t noise_read_mmio(uintptr_t address,unsigned bytes) {
     noise_boot_poll();
-    if(!noise_gpu_bootstrap_result.irq_connected || (address&(bytes-1))) noise_boot_abort(13);
+    if(!noise_gpu_bootstrap_result.irq_connected || !noise_mmio_width(address,bytes)) {
+        noise_gpu_bootstrap_result.last_address=(uint32_t)address;
+        noise_gpu_bootstrap_result.last_effect_written=0;
+        noise_gpu_bootstrap_result.last_observed_valid=0;
+        noise_boot_abort(13);
+    }
     uint32_t flags=noise_cli();
     if(noise_gpu_bootstrap_result.status) { noise_flags(flags); noise_boot_abort(12); }
     ++noise_gpu_bootstrap_result.reads;
@@ -150,7 +177,7 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     noise_gpu_bootstrap_result.requested=value;
     noise_gpu_bootstrap_result.last_effect_written=0;
     noise_gpu_bootstrap_result.last_observed_valid=0;
-    if(!noise_gpu_bootstrap_result.irq_connected || (address&(bytes-1))) noise_boot_abort(13);
+    if(!noise_gpu_bootstrap_result.irq_connected || !noise_mmio_width(address,bytes)) noise_boot_abort(13);
     /* Closed ordinary enable fields. Any other effect stops BEFORE the store.
      * PBUS aliases use aligned DWORD accesses, as required by primary BAR0 docs.
      * PCI command writes zero to STATUS; MISC preserves HEADER_TYPE/BIST.

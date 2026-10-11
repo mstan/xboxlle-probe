@@ -14,6 +14,7 @@ import struct
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 import pefile
 from unicorn import Uc,UC_ARCH_X86,UC_MODE_32,UC_HOOK_CODE,UC_HOOK_MEM_READ,UC_HOOK_MEM_WRITE
@@ -21,7 +22,7 @@ from unicorn.x86_const import UC_X86_REG_ESP,UC_X86_REG_EIP,UC_X86_REG_EAX,UC_X8
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'host'))
-from noise_gpu_bootstrap_build import build,digest,SDK
+from noise_gpu_bootstrap_build import build,digest,SDK,PRIMARY
 
 OUTPUT=None
 IMAGE=None
@@ -29,20 +30,41 @@ RECORDS=[]
 RETURN=0x7000f000
 STACK=0x82000000
 THREAD=0x83000000
+NS='{http://nouveau.freedesktop.org/}'
+# Independent declarative primary register widths, not the C guard's switch.
+VGA_BYTES=set()
+vga=ET.parse(PRIMARY/'rnndb/display/nv_vga.xml')
+for group,base in [('nv_vga_vio',0xfd0c0000),('nv_vga_cio',0xfd601000),('nv_vga_dio',0xfd681000)]:
+    node=vga.find(f'.//{NS}group[@name="{group}"]')
+    for register in node.findall(NS+'reg8'):VGA_BYTES.add(base+int(register.attrib['offset'],0))
+WIDTH_CASES={
+    'width-read-byte':('load_i8',0xfd001804,13),
+    'width-read-half':('load_i16',0xfd001804,13),
+    'width-write-byte':('store_i8',0xfd001804,13),
+    'width-write-half':('store_i16',0xfd001804,13),
+    'width-vga-half':('load_i16',0xfd6013d4,13),
+    'width-near-vga':('load_i8',0xfd6013d6,13),
+    'width-vio-byte':('load_i8',0xfd0c03cc,14),
+    'width-cio-byte':('load_i8',0xfd6013d5,14),
+    'width-dio-byte':('load_i8',0xfd6813c9,14),
+    'width-vga-write':('store_i8',0xfd6013d5,14),
+}
+class Bar0WidthError(AssertionError):pass
 
 def words(data):return list(struct.unpack('<'+'I'*(len(data)//4),bytes(data)))
 
 class Machine:
-    def __init__(self,fault=''):
+    def __init__(self,fault='',image=None):
         self.fault=fault;self.uc=Uc(UC_ARCH_X86,UC_MODE_32)
-        pe=pefile.PE(str(IMAGE/'noise-diagnostic.exe'))
+        self.image=Path(image or IMAGE)
+        pe=pefile.PE(str(self.image/'noise-diagnostic.exe'))
         self.base=pe.OPTIONAL_HEADER.ImageBase
         self.uc.mem_map(self.base,(pe.OPTIONAL_HEADER.SizeOfImage+4095)&~4095)
         self.uc.mem_write(self.base,pe.get_memory_mapped_image())
         self.exports={entry.name.decode():self.base+entry.address
                       for entry in pe.DIRECTORY_ENTRY_EXPORT.symbols if entry.name}
         self.symbols={}
-        for line in (IMAGE/'noise-diagnostic.map').read_text().splitlines():
+        for line in (self.image/'noise-diagnostic.map').read_text().splitlines():
             match=re.match(r' \w{4}:\w{8}\s+(\S+)\s+(\w{16})',line)
             if match:self.symbols[match[1]]=int(match[2],16)
         self.uc.mem_map(0x70000000,0x10000)
@@ -72,12 +94,15 @@ class Machine:
         self.clock=100;self.kernel_calls=[];self.mmio=[];self.allocations=[];self.pins=[]
         self.counter_calls=0;self.interrupt=None;self.connected=False
         self.inject=False;self.injected=False;self.pending_import=False
+        self.width_pending=False;self.width_injected=False;self.width_violation=None
         self.next_ram=0x80100000
         self.uc.hook_add(UC_HOOK_CODE,self.provider,begin=0x70000000,end=0x70003000)
         poll=self.symbols['_noise_boot_poll']
         self.uc.hook_add(UC_HOOK_CODE,self.poll_hook,begin=poll,end=poll)
         self.uc.hook_add(UC_HOOK_MEM_READ,self.mmio_read,begin=0xfd000000,end=0xfdffffff)
         self.uc.hook_add(UC_HOOK_MEM_WRITE,self.mmio_write,begin=0xfd000000,end=0xfdffffff)
+        entry=self.symbols['_noise_boot_bus_master']
+        self.uc.hook_add(UC_HOOK_CODE,self.width_hook,begin=entry,end=entry)
 
     def set(self,address,value):self.uc.mem_write(address,struct.pack('<I',value&0xffffffff))
     def get(self,address):return words(self.uc.mem_read(address,4))[0]
@@ -158,7 +183,7 @@ class Machine:
         if self.inject and not self.injected and self.fault=='irq-during-allocation':uc.emu_stop()
 
     def mmio_read(self,uc,access,address,size,value,data):
-        assert size in [1,2,4]
+        self.check_primary_width('read',address,size)
         if address==0xfd400700 and self.fault=='busy':self.set(address,1)
         if address==0xfd000140 and self.fault=='mask-readback' and any(x[0]=='write' for x in self.mmio):self.set(address,1)
         if address==0xfd600140 and self.fault=='crtc-readback':self.set(address,1)
@@ -180,6 +205,7 @@ class Machine:
         self.mmio.append(['read',address,size,int.from_bytes(uc.mem_read(address,size),'little')])
 
     def mmio_write(self,uc,access,address,size,value,data):
+        self.check_primary_width('write',address,size)
         assert self.connected or (self.pending_import and self.injected)
         self.mmio.append(['write',address,size,value])
         if address==0xfd001804:
@@ -201,6 +227,17 @@ class Machine:
             if self.fault=='latency-readback':writable&=~0xff00
             self.pci_misc=(self.pci_misc&~writable)|(value&writable)
 
+    def check_primary_width(self,operation,address,size):
+        valid=(size==1 and address in VGA_BYTES) or (size==4 and not(address&3) and
+            not any(address+i in VGA_BYTES for i in range(4)))
+        if not valid:
+            self.width_violation=dict(operation=operation,address=address,bytes=size)
+            raise Bar0WidthError(f'unsupported BAR0 {operation}: {address:08x}/{size}')
+
+    def width_hook(self,uc,address,size,data):
+        if self.fault in WIDTH_CASES and not self.width_injected:
+            self.width_pending=True;uc.emu_stop()
+
     def poll_hook(self,uc,address,size,data):
         if self.inject and not self.injected and (uc.reg_read(UC_X86_REG_EFLAGS)&0x200):
             uc.emu_stop()
@@ -208,6 +245,25 @@ class Machine:
     def drive(self,address):
         for _ in range(4):
             self.uc.emu_start(address,RETURN,count=15000000)
+            if self.width_pending:
+                # A negative/representative API invocation in the real active
+                # command, after its actual allocator/event/IRQ producers.
+                # This does not replace SDK setup, advance its PC or set ready.
+                self.width_pending=False;self.width_injected=True
+                context=self.uc.context_save()
+                kind,target,_=WIDTH_CASES[self.fault]
+                self.set(target,0x5a)
+                stack=STACK+0xe000
+                self.uc.mem_write(stack,struct.pack('<III',RETURN,target,7))
+                self.uc.reg_write(UC_X86_REG_ESP,stack)
+                function=self.symbols['_noise_boot_'+kind]
+                self.uc.emu_start(function,RETURN,count=100000)
+                assert self.uc.reg_read(UC_X86_REG_EIP)==RETURN
+                if self.result()[2]:return self.uc.reg_read(UC_X86_REG_EAX)
+                assert kind=='load_i8' and target in VGA_BYTES
+                assert self.uc.reg_read(UC_X86_REG_EAX)==0x5a
+                self.uc.context_restore(context)
+                address=self.uc.reg_read(UC_X86_REG_EIP);continue
             if self.inject and not self.injected:
                 self.injected=True
                 context=self.uc.context_save()
@@ -341,6 +397,20 @@ class BootstrapTests(unittest.TestCase):
         self.check('crtc-readback',12,4,3)
         self.check('elapsed',8)
 
+    def test_primary_bar0_width_guards(self):
+        for fault,(kind,address,status) in WIDTH_CASES.items():
+            with self.subTest(fault=fault):
+                positive=fault in ['width-vio-byte','width-cio-byte','width-dio-byte']
+                machine=self.check(fault,status,4,6 if positive else 1)
+                self.assertTrue(machine.width_injected)
+                self.assertIsNone(machine.width_violation) # guard precedes provider
+                if not positive:
+                    self.assertEqual(machine.result()[8],address)
+                    self.assertEqual(machine.result()[22:24],[0,0])
+                    self.assertFalse(any(x[1]==address for x in machine.mmio))
+                else:
+                    self.assertIn(['read',address,1,0x5a],machine.mmio)
+
     def test_irq_failure_has_no_following_operation(self):
         for fault in ['irq-in-connect','irq-after-command','irq-during-allocation']:
             machine=self.check(fault,12)
@@ -359,14 +429,28 @@ class BootstrapTests(unittest.TestCase):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output',type=Path)
+    parser.add_argument('--prior-image',type=Path,help='Retained pre-fix linked PE directory; offline causal observation only')
     args,remaining=parser.parse_known_args();OUTPUT=args.output
     suite=unittest.defaultTestLoader.loadTestsFromTestCase(BootstrapTests)
     result=unittest.TextTestRunner(verbosity=2).run(suite)
+    prior_repro=None
+    if args.prior_image:
+        machine=Machine(image=args.prior_image)
+        try:machine.call('noise_gpu_bootstrap')
+        except Bar0WidthError:
+            assert machine.width_violation==dict(operation='read',address=0xfd001804,bytes=2)
+            prior_repro=dict(scope='Prior halfword-load failure under primary-derived BAR0 model; not a physical failure',
+                violation=machine.width_violation,result=machine.result(),mmio=machine.mmio,
+                kernel_calls=machine.kernel_calls,
+                artifacts=[dict(path=str(args.prior_image/name),sha256=digest(args.prior_image/name))
+                           for name in ['noise-diagnostic.exe','noise-diagnostic.map','compiled-bootstrap.aot-private.json']])
+        else:raise AssertionError('expected causal pre-fix width failure was not reproduced')
     if OUTPUT:
         artifacts=[dict(path=str(p),sha256=digest(p)) for p in IMAGE.rglob('*') if p.is_file()]
         report=dict(scope='Actual SDK bootstrap prefix and owner/failure proof; no working capture or silicon qualification',
                     groups=result.testsRun,cases=len(RECORDS),success=result.wasSuccessful(),
                     records=RECORDS,artifacts=artifacts,network_operations=0,
+                    prior_width_failure=prior_repro,
                     source=dict(path=str(Path(__file__).resolve()),sha256=digest(__file__)))
         (OUTPUT/'compiled-bootstrap-model.aot-private.json').write_text(json.dumps(report,indent=2))
     raise SystemExit(not result.wasSuccessful())
