@@ -51,7 +51,15 @@ class Machine:
         self.uc.mem_map(0x80000000,0x1000)
         self.uc.mem_map(0xfd000000,0x1000000)
         self.set(THREAD+28,STACK+0x10000);self.set(THREAD+32,STACK)
-        self.set(0xfd001804,0xf9000003) # status ones MUST NOT receive an RMW store
+        self.pci_command=0xf9000003 # STATUS W1C ones must receive zero, not RMW bits
+        # Independent PCI fields: a nonzero ROM address, nonzero cache/latency,
+        # read-only multifunction/header and BIST-capable/completion sentinels.
+        self.pci_rom=0xf0000001
+        self.pci_misc=0x87803410
+        if fault=='rom-disabled':self.pci_rom&=~1
+        if fault=='pci-header':self.pci_misc|=0x00010000
+        if fault=='pci-bist':self.pci_misc|=0x40000000
+        self.command_reads=0;self.rom_reads=0;self.misc_reads=0
         self.kernel={}
         defs=(SDK/'lib/xboxkrnl/xboxkrnl.exe.def').read_text()
         for name,arg_bytes,ordinal in re.findall(r'^\s+(\w+)(?:@(\d+))?\s+@\s*(\d+) NONAME',defs,re.M):
@@ -150,21 +158,48 @@ class Machine:
         if self.inject and not self.injected and self.fault=='irq-during-allocation':uc.emu_stop()
 
     def mmio_read(self,uc,access,address,size,value,data):
-        assert size in [2,4]
+        assert size in [1,2,4]
         if address==0xfd400700 and self.fault=='busy':self.set(address,1)
         if address==0xfd000140 and self.fault=='mask-readback' and any(x[0]=='write' for x in self.mmio):self.set(address,1)
         if address==0xfd600140 and self.fault=='crtc-readback':self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-in-connect' and self.injected:self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-after-command' and self.injected:self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-during-allocation' and self.injected:self.set(address,1)
+        if address==0xfd001804:
+            self.command_reads+=1
+            if self.fault=='command-drift' and self.command_reads==2:self.pci_command^=2
+            self.set(address,self.pci_command)
+        if address==0xfd001830:
+            self.rom_reads+=1
+            if self.fault=='rom-drift' and self.rom_reads==2:self.pci_rom^=0x800
+            self.set(address,self.pci_rom)
+        if address==0xfd00180c:
+            self.misc_reads+=1
+            if self.fault=='misc-drift' and self.misc_reads==2:self.pci_misc|=0x40000000
+            self.set(address,self.pci_misc)
         self.mmio.append(['read',address,size,int.from_bytes(uc.mem_read(address,size),'little')])
 
     def mmio_write(self,uc,access,address,size,value,data):
         assert self.connected or (self.pending_import and self.injected)
         self.mmio.append(['write',address,size,value])
         if address==0xfd001804:
-            assert size==2 and value==7
+            assert size==4 and value==7
+            # Ordinary command bits and W1C status are distinct hardware effects.
+            if self.fault!='command-readback':
+                self.pci_command=(self.pci_command&0xffff0000&~(value&0xf9000000))|(value&0xffff)
             if self.fault in ['irq-after-command','irq-pending']:self.inject=True
+        elif address==0xfd001830:
+            assert size==4 and value==(self.pci_rom&~1)
+            if self.fault!='rom-readback':self.pci_rom=value
+            if self.fault=='rom-address-readback':self.pci_rom^=0x800
+        elif address==0xfd00180c:
+            assert size==4 and value==((self.pci_misc&~0xffff)|0xf800)
+            # Header, multifunction, BIST capability/result are read-only here;
+            # BIST START is writable but the real preflight requires it clear.
+            writable=0x4000ffff
+            if self.fault=='cache-readback':writable&=~0xff
+            if self.fault=='latency-readback':writable&=~0xff00
+            self.pci_misc=(self.pci_misc&~writable)|(value&writable)
 
     def poll_hook(self,uc,address,size,data):
         if self.inject and not self.injected and (uc.reg_read(UC_X86_REG_EFLAGS)&0x200):
@@ -235,15 +270,24 @@ class BootstrapTests(unittest.TestCase):
         return machine
 
     def test_genuine_sdk_prefix_and_guard(self):
-        machine=self.check('',14,4,4)
+        machine=self.check('',14,4,6)
         state=machine.result()
-        self.assertEqual(state[8:10],[0xfd001830,0])
+        self.assertEqual(state[8:10],[0xfd000200,0xffffffff])
         self.assertEqual(state[22:24],[0,0]) # unsupported store and readback NOT performed
         self.assertEqual(machine.get(0xfd001804),0xf9000007)
         self.assertEqual(len(machine.pins),4)
         for allocation in machine.allocations:
             self.assertEqual(machine.uc.mem_read(allocation['address'],32),b'\0'*32)
-        self.assertFalse(any(x[1]==0xfd001830 for x in machine.mmio))
+        self.assertEqual(machine.get(0xfd001830),0xf0000000) # never clears/moves the address
+        self.assertEqual(machine.get(0xfd00180c),0x8780f800) # no header/BIST write
+        stores=[x for x in machine.mmio if x[0]=='write']
+        self.assertEqual(stores[-2:],[['write',0xfd001830,4,0xf0000000],
+                                    ['write',0xfd00180c,4,0x8780f800]])
+        self.assertTrue(all(x[2]==4 for x in stores))
+        self.assertFalse(any(x[0]=='write' and x[1]==0xfd000200 for x in machine.mmio))
+        self.assertFalse(any(x[1] in [0xfd680500,0xfd009200,0xfd009210,
+                                      0xfd009420,0xfd002210,0xfd002214] for x in machine.mmio))
+        self.assertFalse(any(x[0]=='MmClaimGpuInstanceMemory' for x in machine.kernel_calls))
         self.assertEqual(state[13],0) # no fabricated successful SDK return
         self.assertEqual(state[15],0) # original ready producer has not been reached
 
@@ -252,7 +296,40 @@ class BootstrapTests(unittest.TestCase):
                              ('stack',4),('zero-page',22),('busy',9),('irq-busy',11)]:
             with self.subTest(fault=fault):self.check(fault,status,0,0)
         self.check('mask-readback',12,0,1)
-        self.check('concurrent-bootstrap',14,4,4)
+        self.check('concurrent-bootstrap',14,4,6)
+
+    def test_pci_effect_readback_and_ownership(self):
+        machine=self.check('command-readback',12,4,2)
+        self.assertEqual(machine.mmio[-2:],[['write',0xfd001804,4,7],
+                                         ['read',0xfd001804,4,0xf9000003]])
+        machine=self.check('command-drift',14,4,1)
+        self.assertEqual(machine.result()[8:10],[0xfd001804,7])
+        self.assertEqual(machine.result()[22:24],[0,0])
+        self.assertFalse(any(x[0]=='write' and x[1]==0xfd001804 for x in machine.mmio))
+        machine=self.check('rom-disabled',14,4,6)
+        self.assertEqual(machine.get(0xfd001830),0xf0000000)
+        for fault in ['pci-header','pci-bist']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,31,4,4)
+                self.assertEqual(machine.result()[22:24],[0,1])
+                self.assertFalse(any(x[1]==0xfd001830 for x in machine.mmio))
+        for fault,address,count in [('rom-readback',0xfd001830,5),
+                                     ('rom-address-readback',0xfd001830,5),
+                                     ('cache-readback',0xfd00180c,6),
+                                     ('latency-readback',0xfd00180c,6)]:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,12,4,count)
+                self.assertEqual(machine.mmio[-2][0:2],['write',address])
+                self.assertEqual(machine.mmio[-1][0:2],['read',address])
+                self.assertEqual(machine.result()[22:24],[1,1])
+        machine=self.check('rom-drift',14,4,4)
+        self.assertEqual(machine.result()[8:10],[0xfd001830,0xf0000000])
+        self.assertEqual(machine.result()[22:24],[0,0])
+        self.assertFalse(any(x[0]=='write' and x[1]==0xfd001830 for x in machine.mmio))
+        machine=self.check('misc-drift',14,4,5)
+        self.assertEqual(machine.result()[8:10],[0xfd00180c,0x8780f800])
+        self.assertEqual(machine.result()[22:24],[0,0])
+        self.assertFalse(any(x[0]=='write' and x[1]==0xfd00180c for x in machine.mmio))
 
     def test_owned_memory_and_result_order(self):
         for fault,retained in [('allocation-failure',1),('protection',1),('post-pin',1),
@@ -275,7 +352,7 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(machine.result()[7],1)
                 self.assertEqual(machine.kernel_calls[-1][0],'MmAllocateContiguousMemoryEx')
                 self.assertEqual(machine.pins,[])
-        machine=self.check('irq-pending',14,4,5)
+        machine=self.check('irq-pending',14,4,7)
         self.assertEqual(machine.result()[6],1)
         self.assertEqual(machine.result()[15],0) # real ready producer not reached
 

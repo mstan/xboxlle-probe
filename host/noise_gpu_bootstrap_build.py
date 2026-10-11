@@ -19,6 +19,8 @@ from noise_pair_build import SDK_SHA
 
 ROOT=Path(__file__).resolve().parents[1]
 SDK=Path('F:/Projects/xboxlle/refs/nxdk')
+PRIMARY=Path('F:/Projects/xboxlle/refs/envytools-review-20261008')
+PRIMARY_PIN='f102b82381f3f11cee113d16374c87091db039d9'
 BIN=Path('C:/Users/Matthew/.local/share/retcomm/toolchains/cmake-clang-v1/latest/bin')
 TYPES={'i1':'b1','i8':'i8','i16':'i16','i32':'i32','i64':'i64','float':'f32','double':'f64','ptr':'ptr'}
 
@@ -56,7 +58,10 @@ def bounded_sdk(sdk=SDK):
     text=once(text,'pb_set_gamma_ramp(&gammaRamp);',
               '/* Raw offscreen capture does not change the presentation DAC palette. */')
     text=once(text,'VIDEOREG(NV_PBUS_PCI_NV_1)|=NV_PBUS_PCI_NV_1_BUS_MASTER_ENABLED;',
-              'noise_boot_bus_master(); /* PCI command only, no PCI status W1C */')
+              'noise_boot_bus_master(); /* DWORD command, zero PCI status W1C */')
+    text=once(text,'VIDEOREG(NV_PBUS_PCI_NV_12)=NV_PBUS_PCI_NV_12_ROM_DECODE_DISABLED;\n'
+                  '    VIDEOREG(NV_PBUS_PCI_NV_3)=NV_PBUS_PCI_NV_3_LATENCY_TIMER_248_CLOCKS;',
+              'noise_boot_pci_setup(); /* preserved ROM address and header/BIST */')
     text=once(text,'if (pb_install_gpu_interrupt()==0)\n    {',
               'if (pb_install_gpu_interrupt()==0)\n    {\n        noise_boot_abort(11);')
     text=once(text,'pb_running=1;','pb_running=1;\n    noise_boot_dpc_ready();')
@@ -231,6 +236,15 @@ def build(output,sdk=SDK,xbe=True):
     paths += list((sdk/'lib/pbkit').glob('*.h'))
     paths += list((sdk/'lib/xboxkrnl').glob('*.h'))
     paths += [sdk/'lib/hal'/name for name in ['video.h','xbox.h','debug.h']]
+    primary_names=['rnndb/bus/pbus.xml','rnndb/bus/pci.xml','rnndb/bus/pmc.xml',
+                   'rnndb/bus/ptimer.xml','rnndb/fifo/nv4_pfifo.xml',
+                   'docs/hw/bus/bars.rst','docs/hw/bus/pmc.rst',
+                   'docs/hw/bus/ptimer.rst','docs/hw/memory/nv4-vram.rst',
+                   'hwtest/pgraph_state.cc']
+    primary_inputs=[dict(path=str(PRIMARY/name),sha256=digest(PRIMARY/name),
+                       url=f'https://github.com/envytools/envytools/blob/{PRIMARY_PIN}/{name}')
+                    for name in primary_names]
+    paths += [PRIMARY/name for name in primary_names]
     if xbe:
         paths += cpp+list((sdk/'tools/cxbe').glob('*.h'))+[Path('C:/msys64/mingw64/bin/g++.exe')]
     report=dict(scope='Linked guarded bootstrap/capture image; unsupported effects and live capture remain unqualified',
@@ -239,6 +253,7 @@ def build(output,sdk=SDK,xbe=True):
                 converted_executable_sections=converted_code,
                 bootstrap_result_bytes=288,capture_result_bytes=1104,
                 sdk_commit='29638d0b001f179b73c3513489af10ddc2986216',
+                primary_commit=PRIMARY_PIN,primary_inputs=primary_inputs,
                 artifacts=[dict(path=str(p),sha256=digest(p)) for p in paths])
     (output/'compiled-bootstrap.aot-private.json').write_text(json.dumps(report,indent=2))
     return report

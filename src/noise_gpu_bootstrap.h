@@ -24,6 +24,7 @@ void noise_boot_debug_stop(const char *format, ...);
 int noise_boot_irq_connect(void);
 void noise_boot_dpc_ready(void);
 void noise_boot_bus_master(void);
+void noise_boot_pci_setup(void);
 void noise_boot_wbinvd(void);
 PVOID NTAPI noise_boot_allocate(SIZE_T, ULONG_PTR, ULONG_PTR, ULONG_PTR, ULONG);
 PVOID NTAPI noise_boot_instance(SIZE_T, SIZE_T *);

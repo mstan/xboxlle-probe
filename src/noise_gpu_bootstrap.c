@@ -13,7 +13,7 @@ static KINTERRUPT noise_interrupt;
 static void *noise_unwind[5];
 static int noise_active, noise_servicing, noise_dpc_ready;
 static uint64_t noise_frequency, noise_previous, noise_deadline;
-static uint32_t noise_instance_begin, noise_instance_end;
+static int noise_instance_queried;
 static int noise_zero_owned;
 extern int pb_init(void);
 extern int noise_pair_capture(void);
@@ -152,24 +152,40 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     noise_gpu_bootstrap_result.last_observed_valid=0;
     if(!noise_gpu_bootstrap_result.irq_connected || (address&(bytes-1))) noise_boot_abort(13);
     /* Closed ordinary enable fields. Any other effect stops BEFORE the store.
-     * PCI command is deliberately written at 16 bits, never RMW PCI status.
-     * Remaining SDK reset/clock/PIO/scanout effects require separate review.
+     * PBUS aliases use aligned DWORD accesses, as required by primary BAR0 docs.
+     * PCI command writes zero to STATUS; MISC preserves HEADER_TYPE/BIST.
+     * ROM decode clears only ENABLE and must preserve its observed address.
+     * SDK engine/reset/clock/PIO/scanout effects require separate review.
      */
     uint32_t mask=0;
     if(bytes==4 && address==0xfd000140 && value<=1) mask=3;
     if(bytes==4 && (address==0xfd600140 || address==0xfd009140) && value==0) mask=1;
-    if(bytes==2 && address==0xfd001804) mask=0xffff;
-    if(bytes==4 && address>=noise_instance_begin && address+4<=noise_instance_end &&
-       noise_instance_begin) mask=0xffffffffu;
+    if(bytes==4 && address==0xfd001804 && !(value&0xffff0000u)) mask=0xffff;
+    if(bytes==4 && address==0xfd001830 && !(value&1)) mask=0xffffffffu;
+    if(bytes==4 && address==0xfd00180c && (value&0xffff)==0xf800) mask=0xffffffffu;
     if(!mask) noise_boot_abort(14);
     uint32_t flags=noise_cli();
     if(noise_gpu_bootstrap_result.status) { noise_flags(flags); noise_boot_abort(12); }
+    if(address==0xfd001804 || address==0xfd001830 || address==0xfd00180c) {
+        /* No relocation, W1C acknowledgement, or BIST/header change is allowed.
+         * Check the current full value inside the same checked transaction.
+         */
+        ++noise_gpu_bootstrap_result.reads;
+        uint32_t before=*(volatile uint32_t *)address;
+        uint32_t expected=address==0xfd001804?((before&0xffff)|4):
+                          address==0xfd001830?(before&~1u):((before&~0xffffu)|0xf800);
+        if(value!=expected || (address==0xfd00180c && (before&0x407f0000u))) {
+            noise_flags(flags); noise_boot_abort(14);
+        }
+    }
     ++noise_gpu_bootstrap_result.writes;
     noise_gpu_bootstrap_result.last_effect_written=1;
-    if(bytes==2) *(volatile uint16_t *)address=(uint16_t)value;
+    if(bytes==1) *(volatile uint8_t *)address=(uint8_t)value;
+    else if(bytes==2) *(volatile uint16_t *)address=(uint16_t)value;
     else *(volatile uint32_t *)address=value;
     ++noise_gpu_bootstrap_result.reads;
-    uint32_t observed=bytes==2?*(volatile uint16_t *)address:*(volatile uint32_t *)address;
+    uint32_t observed=bytes==1?*(volatile uint8_t *)address:
+                      bytes==2?*(volatile uint16_t *)address:*(volatile uint32_t *)address;
     noise_gpu_bootstrap_result.observed=observed;
     noise_gpu_bootstrap_result.last_observed_valid=1;
     if((observed&mask)!=(value&mask)) noise_record_failure(12);
@@ -242,8 +258,26 @@ void *noise_boot_sdk_memcpy(void *p,const void *q,unsigned n) {
     return p;
 }
 void noise_boot_bus_master(void) {
-    uint16_t old=noise_boot_load_i16((uint16_t *)0xfd001804);
-    noise_boot_store_i16((uint16_t *)0xfd001804,old|4);
+    uint32_t old=noise_boot_load_i32((uint32_t *)0xfd001804);
+    /* Zero STATUS does not acknowledge any of its W1C flags. */
+    noise_boot_store_i32((uint32_t *)0xfd001804,(old&0xffff)|4);
+}
+void noise_boot_pci_setup(void) {
+    /* Type-zero PCI header only. An active BIST is not our bootstrap owner.
+     * Aligned DWORD write preserves HEADER_TYPE and the inactive BIST fields.
+     */
+    uint32_t misc=noise_boot_load_i32((uint32_t *)0xfd00180c);
+    if((misc&0x007f0000u) || (misc&0x40000000u)) {
+        noise_gpu_bootstrap_result.last_address=0xfd00180c;
+        noise_gpu_bootstrap_result.requested=0;
+        noise_gpu_bootstrap_result.observed=misc;
+        noise_gpu_bootstrap_result.last_effect_written=0;
+        noise_gpu_bootstrap_result.last_observed_valid=1;
+        noise_boot_abort(31);
+    }
+    uint32_t rom=noise_boot_load_i32((uint32_t *)0xfd001830);
+    noise_boot_store_i32((uint32_t *)0xfd001830,rom&~1u);
+    noise_boot_store_i32((uint32_t *)0xfd00180c,(misc&~0xffffu)|0xf800);
 }
 void noise_boot_wbinvd(void) {
     noise_boot_poll();
@@ -300,7 +334,7 @@ PVOID NTAPI noise_boot_allocate(SIZE_T bytes,ULONG_PTR low,ULONG_PTR high,ULONG_
 }
 PVOID NTAPI noise_boot_instance(SIZE_T request,SIZE_T *padding) {
     noise_boot_poll();
-    if(request!=0xffffffffu || noise_instance_begin) noise_boot_abort(23);
+    if(request!=0xffffffffu || noise_instance_queried) noise_boot_abort(23);
     void *top=MmClaimGpuInstanceMemory(request,padding); /* query, not resize */
     noise_check_sticky();
     uint32_t address=(uint32_t)(uintptr_t)top;
@@ -320,8 +354,10 @@ PVOID NTAPI noise_boot_instance(SIZE_T request,SIZE_T *padding) {
     if(physical!=start-0x80000000 || physical+0x5000>0x03ff0000) noise_boot_abort(23);
     MmLockUnlockBufferPages((void *)(uintptr_t)start,0x5000,FALSE);
     noise_check_sticky();
-    noise_instance_begin=0xfd700000u+*padding;
-    noise_instance_end=noise_instance_begin+0x5000;
+    /* CPU reservation provenance does not establish a physical PRAMIN alias.
+     * All aperture writes stay guarded pending that independent owner proof.
+     */
+    noise_instance_queried=1;
     return top;
 }
 NTSTATUS NTAPI noise_boot_event(PHANDLE handle,POBJECT_ATTRIBUTES attributes,EVENT_TYPE type,BOOLEAN state) {
