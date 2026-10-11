@@ -202,11 +202,54 @@ The remaining downstream requirements stay guarded:
   documentation is unfinished, and the retained original owner also keeps
   alias equivalence explicit. No PRAMIN write admission is currently present.
 - Primary RAMHT fields establish its address/search encoding. The SDK's RAMFC
-  value decodes to `UNK17=44` using the primary field layout, whose initialization
-  comment says `45`. The SDK itself records both its calculated `00890110`
+  value decodes to `UNK17=0x44` using the primary field layout, whose initialization
+  comment says `0x45`. The SDK itself records both its calculated `00890110`
   and a different observed `008A0110`. Those comments establish neither the
-  field's meaning nor context-loading behavior. This entire next write stays
-  guarded; accepting only its known address bits would not make it safe.
+  field's meaning nor context-loading behavior. These values also differ in
+  the defined LARGE bit: calculated one, commented zero. This entire next write
+  stays guarded; accepting only its known address bits would not make it safe.
+
+## Original reservation lifetime and next ownership connection
+
+The pinned SDK initializer requests `UINT_MAX`; it does not request a shrink.
+The diagnostic preserves that actual query and pins only the five pages below
+its returned top. The sixteen-page inspection above is separate original-kernel
+evidence, not a claim that the diagnostic pins the whole old reservation.
+
+The original XDK renderer has a different producer: its driver initializer
+passes the same driver object to the instance initializer, which requests
+`0x5000` from export 168. It retains the returned CPU top minus `0x5000` in that
+object, separately retains the PRAMIN address derived from the returned padding,
+then continues through real FIFO/graph setup on that object. The retained
+[original reservation reference](https://github.com/mstan/xboxlle/blob/feat/blinx-audio-lle-20261009/tools/native_gpu_instance_reference.py)
+already exercises query, shrink to `0x5000`, repeat, then shrink to `0x4000`
+across three lifetimes. Its nine cases show actual released-page protection zero
+and retained-page protection `0x204`, with unchanged top and padding. No new
+execution is needed to qualify those same operations again. Growth and physical
+aperture equivalence remain outside that proof.
+
+Export 168 resizes a global reservation; it supplies no distinct per-user
+ownership token. A successful shrink, an exclusive IRQ and page pinning therefore
+do not prove that this diagnostic owns every instance consumer or may release
+the surplus pages. Replacing the pinned SDK query with a shrink would introduce
+a page-release operation that the SDK did not request. This diagnostic does not
+make that substitution. Its next RAMFC write, aperture writes, protection change
+and prepared marker remain guarded.
+
+The minimum next connection is the actual original renderer object's entry,
+reservation and retirement lifetime, with exclusive instance consumers and the
+CPU/aperture backing relationship established. Reuse its existing shrink/repeat
+contract and retained pages, then compose context publication, graph/tile/IRQ
+and actual DMA consumption together. Do not create readiness to bypass that
+owner. The source-level dependency remains explicit even if a future read-only
+console observation confirms current RAMFC or protection values.
+
+Linux [selects the NV17 FIFO for NV2A](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/nouveau/nvkm/engine/device/base.c).
+That [FIFO producer](https://github.com/torvalds/linux/blob/v6.12/drivers/gpu/drm/nouveau/nvkm/engine/fifo/nv17.c)
+supports the defined LARGE bit and 64-byte channel layout, but does not explain
+the SDK's high-field calculation. `pb_running` remains an early service producer,
+set before graph contexts, actual DMA startup and targets. Only the genuine
+successful initializer return may admit the existing capture owner.
 
 ## Prepared instance-alias comparison and unmet preconditions
 
