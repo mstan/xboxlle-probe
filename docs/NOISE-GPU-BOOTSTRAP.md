@@ -65,7 +65,7 @@ there is no one-pointer relocation or fabricated system reservation.
 ## Current admitted prefix and exact stop
 
 The closed policy admits PMC interrupt masking/enabling, disabled PCRTC/PTIMER
-interrupt fields, and the bounded PCI controls below. Every admitted MMIO write
+interrupt fields, bounded engine and timer controls, and the PCI controls below. Every admitted MMIO write
 uses an aligned DWORD transaction with its immediate readback. The earlier
 halfword command adapter was corrected: normal PCI field widths do not establish
 narrow-access support through the PBUS MMIO alias. Primary BAR0 documentation
@@ -98,45 +98,78 @@ transaction before publication. An observed ownership/context change stops
 before the pending store. Requested and observed values and whether each operation
 occurred remain distinct result fields. There is no retry, rollback or fallback.
 
-Actual offline execution of the unchanged remainder of `pb_init` reaches four
-validated/pinned/zeroed allocations, the real event creation and six checked
-stores, then stops **before** its original `FD000200=FFFFFFFF` engine-enable
-write. The request has no write or corresponding readback. The SDK's earlier
-read of old PMC_ENABLE for its backup is preserved; it is not a readback of that
-unperformed request. Original reset, clock, tile, VGA PIO, FIFO transport and
-scanout operations farther downstream remain guarded. The successful SDK-return
-certificate has not been produced, so `noise_gpu_capture` refuses work.
+The preserved `6277102` generation stopped before the blanket engine-enable
+request. The current private SDK copy replaces that one request with the bounded
+owner below, then executes the original PLL calculation and adapted timer
+producer. Actual offline execution reaches four validated/pinned/zeroed
+allocations, the real event, eleven checked stores, and the actual query-only
+instance-memory API with five-page pinning and post-pin verification. It stops
+**before** `RAMHT FD002210=03000100` in the nominal owned fixture. That request
+has no store or corresponding readback. The queried reservation remains intact;
+there are no RAMFC or PRAMIN writes. The successful SDK-return certificate has
+not been produced, so `noise_gpu_capture` refuses work.
 
-## Remaining reset, clock and instance contract
+## Bounded engine, timer and instance contract
 
-The next exact request is the SDK's blanket `PMC_ENABLE=FFFFFFFF`. Primary PMC
+The original SDK request is blanket `PMC_ENABLE=FFFFFFFF`. Primary PMC
 documentation establishes that clearing an engine-enable bit generally resets
 that engine and removes its MMIO range. It names PFIFO/PGRAPH/PTIMER/PFB/display
 enable fields but leaves NV10+ bit 0 and some family-dependent fields unresolved.
 The SDK and the primary hardware test both use all-one enables; that use does
 not provide a complete NV2A effect or readback mask for every written bit.
-This image retains the guard rather than admitting a fabricated full latch.
-A continuation needs a justified NV2A enable policy and explicit treatment of
-preserved/unsupported fields before admitting the subsequent real producers.
+The generated diagnostic copy changes this request to `observed | 00001100`,
+enabling only the documented PFIFO/PGRAPH fields. Preflight requires PGRAPH,
+PTIMER, PFB and PCRTC already enabled, before reading their MMIO. Framebuffer,
+timer, display and active graphics engines are never disabled or reset. A
+disabled PFIFO is not read before enabling it; an already enabled PFIFO must
+have no pending interrupt. All unresolved and variant-dependent enable fields
+retain their actual observed value, and any changed complete readback stops.
+This is a constrained diagnostic policy, not equivalence to the SDK's all-one
+write or a claim that unknown fields are inert.
 
-The audit identifies the following downstream requirements without executing
-them or substituting ready state:
+The checked transaction revalidates the enable value, exclusive owner, all
+three masked interrupt controls and quiet PMC/PGRAPH sources before the store.
+After immediate exact readback it checks actual PMC/PGRAPH/PFIFO status again.
+No source is acknowledged to advance startup. A pending source or changed
+context stops; no reset, ready certificate or completion is synthesized.
 
-- The original NVPLL check must still compute 233333324 Hz from the actual
-  coefficients and crystal constant; an unsupported coefficient stops. No PLL
-  register write is required by this part of the SDK.
-- PTIMER `CLOCK_DIV=56968` and `CLOCK_MUL=7629` are 16-bit ratio fields. Primary
-  documentation requires a nonzero divider and `0 <= MUL <= DIV`; a safe owner
-  must validate the existing intermediate ratio before sequential updates and
-  use `0000FFFF` field readbacks, not full-value latches. The CPU command's
-  bounded time source must remain valid across these GPU timer changes.
-- PTIMER `ALARM=FFFFFFFF` is a compare producer, not a plain full-word latch.
-  Bits 0–4 read zero; its defined readback is `FFFFFFE0`, and the alarm can set
-  interrupt status even while that interrupt is masked. The existing interrupt
-  owner must handle the actual event, not synthesize or clear it by polling.
+The actual original SDK PLL calculation still runs. Its accepted source is
+233333324 Hz. The adapter rereads that coefficient and revalidates it in every
+timer transaction, without writing a PLL register. The documented ratio and
+alarm producer then run as one owned sequence:
+
+| Register | Owned effect |
+| --- | --- |
+| `CLOCK_DIV FD009200` | Preserve unspecified upper bits and set the defined low half to 56968. Require a nonzero old divider, old multiplier no greater than either old or new divider, and unchanged current context before publication. |
+| `CLOCK_MUL FD009210` | After successful divider publication, preserve unspecified upper bits and set the defined low half to 7629. Require the exact previously validated current ratio. Zero old multiplier is a supported stopped counter. |
+| `ALARM FD009420` | After successful ratio publication, request `FFFFFFFF`; documented bits 0–4 read zero, so the immediate defined value is `FFFFFFE0`. This arms a real compare, not a completion latch. |
+
+Every timer store requires its actual preceding stage, PTIMER interrupt mask
+zero, PMC hardware routing enabled, no asserted PMC source, unchanged PLL and
+the actual expected current DIV/MUL values. Ignored writes or changes in the
+preserved unspecified ratio bits stop at immediate readback. Real alarm status
+may be pending while its interrupt is masked; the owner preserves it without
+W1C acknowledgement and verifies that no PMC source has become asserted.
+
+The command deadline is specifically scoped to the captured original-kernel
+performance-clock producer: export126 reads board port8008 and extends its
+counter using kernel rollover globals; export127 returns 3,375,000 Hz. Complete
+function inspection found no GPU MMIO, RDTSC or called provider. Therefore this
+captured producer is independent of GPU PTIMER ratio updates. The owner requires
+that exact frequency and advancing samples before any GPU store. A matching
+frequency alone does **not** identify another live firmware or prove its counter
+implementation. Any physical timer invocation still requires the actual target
+clock route to be established and the standing console stop to be cleared.
+The private source proof does not qualify counter width, rollover cadence or
+silicon converter phase.
+
+The remaining downstream requirements stay guarded:
+
 - `MmClaimGpuInstanceMemory(UINT_MAX, &padding)` is the original query-only
-  producer. The SDK uses its top, padding and five-page reservation to place
-  RAMHT/RAMFC and clear PRAMIN. CPU page ownership must not be treated as an
+  producer, now actually reached. Its CPU mapping/protection/physical pages and
+  endpoint are validated, pinned and reverified. No resize or freeing occurs.
+  The SDK uses its top, padding and five-page reservation to place RAMHT/RAMFC
+  and clear PRAMIN. CPU page ownership must not be treated as an
   already qualified aperture alias. The primary NV4 RAMIN documentation is
   unfinished, and the retained original owner also keeps physical alias
   equivalence explicit. No PRAMIN write admission is currently present.
@@ -179,8 +212,8 @@ work. The PCI/owner cases exercise 36 complete command lifetimes. The independen
 PCI producer implements STATUS W1C and read-only header/BIST fields instead of
 treating the full configuration word as a latch.
 
-Six focused groups exercise 46 complete command lifetimes in the final width
-generation. Additional cases invoke the actual compiled owner API within a real
+The preserved final width generation exercised six groups and 46 complete
+command lifetimes. Its cases invoke the actual compiled owner API within a real
 active command, after original allocation/event/IRQ producers. Unsupported byte
 and halfword reads/writes fail before provider access, an undefined neighbor is
 guarded, a halfword over a VGA byte alias is guarded, and known VGA byte reads
@@ -190,6 +223,22 @@ inputs test access ownership; they do not assert new original SDK behavior or
 produce readiness. The optional `--prior-image` observation reuses the preserved
 pre-fix executable once and retains its exact failing access and identities;
 ordinary test discovery does not require that private prior image.
+
+The current engine/timer/instance generation exercises nine groups and 79
+complete command lifetimes, plus one independent elapsed-alarm check. Actual
+target cases include a real PFIFO enable and an already enabled retained state;
+missing required engines rejected before any GPU store; changed enable context
+or unknown-field readback; actual pending interrupt sources; original PLL zero
+and unsupported-frequency branches; invalid and stopped old timer ratios;
+ignored DIV/MUL/ALARM effects; changed ratio context and unspecified upper bits;
+masked pending alarm without acknowledgement; failed instance query/protection
+or post-pin verification; and an actual failing ISR after divider publication,
+before multiplier/alarm/query work. The independent timer model takes nominal
+elapsed board ticks into a rational core-clock converter and real 56-bit
+counter/alarm state; repeated status/time reads are passive. Fractional phase at
+a ratio change is an explicit nominal model choice, not a silicon claim. The
+ordinary compiled SDK caller, actual allocator/IRQ/event/query ABI and retained
+resources remain the execution path throughout.
 
 These cases qualify the software owner and supported prefix. They provide no
 silicon reset, physical selector, raster, tiled readback or noise algorithm oracle.

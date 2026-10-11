@@ -62,6 +62,12 @@ def bounded_sdk(sdk=SDK):
     text=once(text,'VIDEOREG(NV_PBUS_PCI_NV_12)=NV_PBUS_PCI_NV_12_ROM_DECODE_DISABLED;\n'
                   '    VIDEOREG(NV_PBUS_PCI_NV_3)=NV_PBUS_PCI_NV_3_LATENCY_TIMER_248_CLOCKS;',
               'noise_boot_pci_setup(); /* preserved ROM address and header/BIST */')
+    text=once(text,'VIDEOREG(NV_PMC_ENABLE)=NV_PMC_ENABLE_ALL_ENABLE;',
+              'noise_boot_engine_setup(); /* documented engines, no blanket unknown-field transition */')
+    text=once(text,'VIDEOREG(NV_PTIMER_NUMERATOR)=56968; //233333324/56968*7629=31247365 (31.25Mhz)\n'
+                  '    VIDEOREG(NV_PTIMER_DENOMINATOR)=7629;\n\n'
+                  '    VIDEOREG(NV_PTIMER_ALARM_0)=0xFFFFFFFF;',
+              'noise_boot_timer_setup(); /* real ratio/compare producer, board-counter deadline */')
     text=once(text,'if (pb_install_gpu_interrupt()==0)\n    {',
               'if (pb_install_gpu_interrupt()==0)\n    {\n        noise_boot_abort(11);')
     text=once(text,'pb_running=1;','pb_running=1;\n    noise_boot_dpc_ready();')
@@ -243,6 +249,7 @@ def build(output,sdk=SDK,xbe=True):
                    'hwtest/pgraph_state.cc','rnndb/display/nv_vga.xml',
                    'rnndb/display/nv3_prmvio.xml','rnndb/display/nv3_pcrtc.xml',
                    'rnndb/display/nv3_pramdac.xml']
+    primary_names += ['docs/hw/pm/nv1-clock.rst']
     primary_inputs=[dict(path=str(PRIMARY/name),sha256=digest(PRIMARY/name),
                        url=f'https://github.com/envytools/envytools/blob/{PRIMARY_PIN}/{name}')
                     for name in primary_names]

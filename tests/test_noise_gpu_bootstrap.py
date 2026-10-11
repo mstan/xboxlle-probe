@@ -51,6 +51,47 @@ WIDTH_CASES={
 }
 class Bar0WidthError(AssertionError):pass
 
+class Timer:
+    """Independent nominal elapsed producer, not reads/polls as completion.
+
+    ACPI ticks inject elapsed time. Rational GPU clocks drive the actual 56-bit
+    counter and compare; passive reads cannot create elapsed time or an IRQ.
+    This proves documented software ordering, not silicon phase.
+    """
+    def __init__(self):
+        self.div=0xbeef0010;self.mul=0xcafe0003
+        self.count=0;self.remainder=0;self.alarm=0;self.armed=False
+        self.pending=0;self.mask=0;self.elapsed=0
+
+    def advance(self,acpi_ticks):
+        self.elapsed+=acpi_ticks
+        div=self.div&0xffff;mul=self.mul&0xffff
+        assert div and mul<=div
+        ticks,self.remainder=divmod(self.remainder+acpi_ticks*233333324*mul,3375000*div)
+        old=self.count;self.count=(self.count+ticks)&((1<<56)-1)
+        if self.armed:
+            distance=((self.alarm>>5)-(old&((1<<27)-1)))&((1<<27)-1)
+            if distance==0 or ticks>=distance:self.pending=1
+
+    def read(self,address):
+        return {0xfd009200:self.div,0xfd009210:self.mul,
+                0xfd009400:(self.count<<5)&0xffffffff,
+                0xfd009410:self.count>>27,0xfd009420:self.alarm,
+                0xfd009100:self.pending,0xfd009140:self.mask}[address]
+
+    def write(self,address,value):
+        if address==0xfd009200:self.div=value
+        elif address==0xfd009210:self.mul=value
+        elif address==0xfd009420:
+            self.alarm=value&~31;self.armed=True
+            if ((self.count<<5)&0xffffffff)==self.alarm:self.pending=1
+        elif address==0xfd009140:self.mask=value&1
+        elif address==0xfd009100:self.pending&=~(value&1) # Primary W1C, never exercised by owner
+        else:raise AssertionError('unknown timer producer')
+        # Fractional converter phase after changing its ratio is not established
+        # here: nominal fixture restarts the fraction, never claims silicon phase.
+        if address in [0xfd009200,0xfd009210]:self.remainder=0
+
 def words(data):return list(struct.unpack('<'+'I'*(len(data)//4),bytes(data)))
 
 class Machine:
@@ -82,6 +123,24 @@ class Machine:
         if fault=='pci-header':self.pci_misc|=0x00010000
         if fault=='pci-bist':self.pci_misc|=0x40000000
         self.command_reads=0;self.rom_reads=0;self.misc_reads=0
+        # Preserve unresolved/variant fields as observed, without treating them
+        # as inert: any changed readback is fatal. Only PFIFO transitions here.
+        self.engine_enable=0xa5113001
+        if fault in ['engine-fifo-enabled','engine-fifo-pending']:self.engine_enable|=0x100
+        disabled={'engine-graph-disabled':12,'engine-timer-disabled':16,
+                  'engine-fb-disabled':20,'engine-crtc-disabled':24}
+        if fault in disabled:self.engine_enable&=~(1<<disabled[fault])
+        self.engine_reads=0;self.engine_changes=[];self.engine_written=False
+        self.timer=Timer();self.timer_writes=[];self.timer_reads={}
+        if fault=='timer-zero-div':self.timer.div&=~0xffff
+        if fault=='timer-invalid-ratio':self.timer.mul=(self.timer.mul&~0xffff)|17
+        if fault=='timer-intermediate-ratio':self.timer.div=60000;self.timer.mul=58000
+        if fault=='timer-stopped':self.timer.mul&=~0xffff
+        if fault=='timer-alarm-pending':self.timer.pending=1
+        self.instance=None
+        self.set(0xfd680500,0x00011c01) # Actual SDK M=1,N=28,P=1 -> 233333324 Hz
+        if fault=='pll-zero':self.set(0xfd680500,0)
+        if fault=='pll-rate':self.set(0xfd680500,0x00011b01)
         self.kernel={}
         defs=(SDK/'lib/xboxkrnl/xboxkrnl.exe.def').read_text()
         for name,arg_bytes,ordinal in re.findall(r'^\s+(\w+)(?:@(\d+))?\s+@\s*(\d+) NONAME',defs,re.M):
@@ -117,18 +176,23 @@ class Machine:
         arguments=words(uc.mem_read(stack+4,arg_bytes)) if arg_bytes else []
         self.kernel_calls.append([name,arguments])
         value=0
-        if name=='KeQueryPerformanceFrequency':value=0 if self.fault=='frequency' else 1000000
+        if name=='KeQueryPerformanceFrequency':
+            value=0 if self.fault=='frequency' else 1000000 if self.fault=='wrong-frequency' else 3375000
         elif name=='KeQueryPerformanceCounter':
             self.counter_calls+=1
+            previous=self.clock
             if self.fault=='counter-stuck':pass
             elif self.fault=='counter-backward' and self.counter_calls==2:self.clock-=1
-            elif self.fault=='elapsed' and self.counter_calls>4:self.clock+=3000000
+            elif self.fault=='elapsed' and self.counter_calls>4:self.clock+=10000000
             else:self.clock+=10
             value=self.clock
+            if self.fault not in ['timer-zero-div','timer-invalid-ratio']:
+                self.timer.advance(max(0,self.clock-previous))
         elif name=='KeGetCurrentThread':value=0 if self.fault=='stack' else THREAD
         elif name=='MmIsAddressValid':
             address=arguments[0];value=int(address in [0x80000000,STACK,STACK+0xffff] or
-                THREAD<=address<THREAD+0x1000 or self.allocation(address) is not None)
+                THREAD<=address<THREAD+0x1000 or self.allocation(address) is not None or
+                self.instance and self.instance['start']<=address<self.instance['top'])
             if self.fault=='zero-page' and address==0x80000000:value=0
         elif name=='MmGetPhysicalAddress':
             address=arguments[0];allocation=self.allocation(address)
@@ -139,6 +203,8 @@ class Machine:
             allocation=self.allocation(arguments[0]);value=allocation['protect'] if allocation else 4
             if allocation and self.fault=='protection':value=2
             if allocation and self.fault=='post-pin' and self.pins:value=2
+            if self.instance and self.instance['start']<=arguments[0]<self.instance['top']:
+                if self.fault=='instance-protection' or (self.fault=='instance-post-pin' and len(self.pins)==5):value=2
         elif name=='MmQueryAllocationSize':
             allocation=self.allocation(arguments[0]);assert allocation
             value=allocation['size']-(4096 if self.fault=='allocation-size' else 0)
@@ -172,6 +238,15 @@ class Machine:
         elif name=='MmLockUnlockBufferPages':
             assert arguments[2]==0
             self.pins.append(arguments[:2])
+        elif name=='MmClaimGpuInstanceMemory':
+            assert arguments[0]==0xffffffff and self.instance is None
+            if self.fault=='instance-failure':value=0
+            else:
+                top=0x83ff0000;start=top-0x5000
+                self.uc.mem_map(start,0x5000);self.uc.mem_write(start,b'\x5a'*0x5000)
+                self.instance=dict(top=top,start=start,physical=start-0x80000000,padding=0x10000)
+                self.set(arguments[1],0x10000 if self.fault!='instance-padding' else 0x4000)
+                value=top
         elif name=='NtCreateEvent':
             assert arguments[1:]==[0,0,0]
             self.set(arguments[0],0x1234);value=0xc000009a if self.fault=='event' else 0
@@ -184,12 +259,33 @@ class Machine:
 
     def mmio_read(self,uc,access,address,size,value,data):
         self.check_primary_width('read',address,size)
+        if address==0xfd000200:
+            self.engine_reads+=1
+            if self.fault=='engine-drift' and self.engine_reads==4:self.engine_enable^=0x20000000
+            self.set(address,self.engine_enable)
+        if address in [0xfd009140,0xfd009200,0xfd009210,0xfd009420,0xfd009100,0xfd009400,0xfd009410]:
+            self.timer_reads[address]=self.timer_reads.get(address,0)+1
+            if self.fault=='timer-drift' and address==0xfd009200 and self.timer_reads[address]==2:
+                self.timer.div^=1
+            if self.fault=='timer-mask-drift' and address==0xfd009140 and any(w[0]==0xfd009200 for w in self.timer_writes):self.timer.mask=1
+            if self.fault=='timer-status' and address==0xfd009100:self.timer.pending=2
+            self.set(address,self.timer.read(address))
+        if address==0xfd100200:self.set(address,3 if self.fault!='framebuffer-config' else 0)
+        if address==0xfd000100 and self.fault=='engine-pending' and self.engine_reads>=4:self.set(address,0x100)
+        if address==0xfd002100:
+            assert self.engine_enable&0x100 # No disabled-engine MMIO assumption
+            if self.fault=='engine-fifo-pending' or (self.fault=='engine-output-pending' and self.engine_written):
+                self.set(address,1)
+        if address in [0xfd400700,0xfd400108]:assert self.engine_enable&0x1000
+        if address in [0xfd600140]:assert self.engine_enable&0x1000000
+        if address in [0xfd009140,0xfd009200,0xfd009210,0xfd009420]:assert self.engine_enable&0x10000
         if address==0xfd400700 and self.fault=='busy':self.set(address,1)
         if address==0xfd000140 and self.fault=='mask-readback' and any(x[0]=='write' for x in self.mmio):self.set(address,1)
         if address==0xfd600140 and self.fault=='crtc-readback':self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-in-connect' and self.injected:self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-after-command' and self.injected:self.set(address,1)
         if address==0xfd000140 and self.fault=='irq-during-allocation' and self.injected:self.set(address,1)
+        if address==0xfd000140 and self.fault=='irq-after-timer' and self.injected:self.set(address,1)
         if address==0xfd001804:
             self.command_reads+=1
             if self.fault=='command-drift' and self.command_reads==2:self.pci_command^=2
@@ -226,6 +322,22 @@ class Machine:
             if self.fault=='cache-readback':writable&=~0xff
             if self.fault=='latency-readback':writable&=~0xff00
             self.pci_misc=(self.pci_misc&~writable)|(value&writable)
+        elif address==0xfd000200:
+            before=self.engine_enable
+            assert (before^value)&~0x1100==0 and value&0x1100==0x1100
+            assert before&0x01111000==0x01111000
+            self.engine_changes.append(dict(before=before,requested=value,changed=before^value))
+            self.engine_written=True
+            if self.fault!='engine-readback':self.engine_enable=value
+            if self.fault=='engine-unknown-readback':self.engine_enable^=0x20000000
+        elif address in [0xfd009140,0xfd009200,0xfd009210,0xfd009420,0xfd009100]:
+            self.timer_writes.append([address,value])
+            fault={0xfd009200:'timer-div-readback',0xfd009210:'timer-mul-readback',
+                   0xfd009420:'timer-alarm-readback'}.get(address)
+            if self.fault!=fault:self.timer.write(address,value)
+            if self.fault=='timer-upper-readback' and address==0xfd009200:self.timer.div^=0x10000000
+            if self.fault=='timer-alarm-low-readback' and address==0xfd009420:self.timer.alarm|=1
+            if self.fault=='irq-after-timer' and address==0xfd009200:self.inject=True
 
     def check_primary_width(self,operation,address,size):
         valid=(size==1 and address in VGA_BYTES) or (size==4 and not(address&3) and
@@ -322,28 +434,35 @@ class BootstrapTests(unittest.TestCase):
                              for x in machine.kernel_calls))
         RECORDS.append(dict(fault=fault or 'none',status=status,result=state,
                             mmio=machine.mmio,kernel_calls=machine.kernel_calls,
-                            pins=machine.pins,allocations=machine.allocations))
+                            pins=machine.pins,allocations=machine.allocations,
+                            engine_changes=machine.engine_changes,timer_writes=machine.timer_writes,
+                            timer=dict(elapsed_acpi_ticks=machine.timer.elapsed,counter=machine.timer.count,
+                                       pending=machine.timer.pending,mask=machine.timer.mask),instance=machine.instance))
         return machine
 
     def test_genuine_sdk_prefix_and_guard(self):
-        machine=self.check('',14,4,6)
+        machine=self.check('',14,4,11)
         state=machine.result()
-        self.assertEqual(state[8:10],[0xfd000200,0xffffffff])
+        self.assertEqual(state[8:10],[0xfd002210,0x03000100])
         self.assertEqual(state[22:24],[0,0]) # unsupported store and readback NOT performed
         self.assertEqual(machine.get(0xfd001804),0xf9000007)
-        self.assertEqual(len(machine.pins),4)
+        self.assertEqual(len(machine.pins),5)
         for allocation in machine.allocations:
             self.assertEqual(machine.uc.mem_read(allocation['address'],32),b'\0'*32)
         self.assertEqual(machine.get(0xfd001830),0xf0000000) # never clears/moves the address
         self.assertEqual(machine.get(0xfd00180c),0x8780f800) # no header/BIST write
         stores=[x for x in machine.mmio if x[0]=='write']
-        self.assertEqual(stores[-2:],[['write',0xfd001830,4,0xf0000000],
-                                    ['write',0xfd00180c,4,0x8780f800]])
+        self.assertEqual(stores[-3:],[['write',0xfd009200,4,0xbeefde88],
+                                    ['write',0xfd009210,4,0xcafe1dcd],
+                                    ['write',0xfd009420,4,0xffffffff]])
         self.assertTrue(all(x[2]==4 for x in stores))
-        self.assertFalse(any(x[0]=='write' and x[1]==0xfd000200 for x in machine.mmio))
-        self.assertFalse(any(x[1] in [0xfd680500,0xfd009200,0xfd009210,
-                                      0xfd009420,0xfd002210,0xfd002214] for x in machine.mmio))
-        self.assertFalse(any(x[0]=='MmClaimGpuInstanceMemory' for x in machine.kernel_calls))
+        self.assertEqual(machine.engine_changes,[dict(before=0xa5113001,requested=0xa5113101,changed=0x100)])
+        self.assertEqual([x for x in machine.mmio if x[1]==0xfd680500],
+                         [['read',0xfd680500,4,0x11c01]]*7)
+        self.assertFalse(any(x[1] in [0xfd002210,0xfd002214] for x in machine.mmio))
+        self.assertEqual(machine.instance,dict(top=0x83ff0000,start=0x83feb000,physical=0x03feb000,padding=0x10000))
+        self.assertEqual(machine.pins[-1],[0x83feb000,0x5000])
+        self.assertEqual(machine.uc.mem_read(0x83feb000,0x5000),b'\x5a'*0x5000) # No guessed PRAMIN alias/store
         self.assertEqual(state[13],0) # no fabricated successful SDK return
         self.assertEqual(state[15],0) # original ready producer has not been reached
 
@@ -352,7 +471,7 @@ class BootstrapTests(unittest.TestCase):
                              ('stack',4),('zero-page',22),('busy',9),('irq-busy',11)]:
             with self.subTest(fault=fault):self.check(fault,status,0,0)
         self.check('mask-readback',12,0,1)
-        self.check('concurrent-bootstrap',14,4,6)
+        self.check('concurrent-bootstrap',14,4,11)
 
     def test_pci_effect_readback_and_ownership(self):
         machine=self.check('command-readback',12,4,2)
@@ -362,7 +481,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(machine.result()[8:10],[0xfd001804,7])
         self.assertEqual(machine.result()[22:24],[0,0])
         self.assertFalse(any(x[0]=='write' and x[1]==0xfd001804 for x in machine.mmio))
-        machine=self.check('rom-disabled',14,4,6)
+        machine=self.check('rom-disabled',14,4,11)
         self.assertEqual(machine.get(0xfd001830),0xf0000000)
         for fault in ['pci-header','pci-bist']:
             with self.subTest(fault=fault):
@@ -401,7 +520,7 @@ class BootstrapTests(unittest.TestCase):
         for fault,(kind,address,status) in WIDTH_CASES.items():
             with self.subTest(fault=fault):
                 positive=fault in ['width-vio-byte','width-cio-byte','width-dio-byte']
-                machine=self.check(fault,status,4,6 if positive else 1)
+                machine=self.check(fault,status,4,11 if positive else 1)
                 self.assertTrue(machine.width_injected)
                 self.assertIsNone(machine.width_violation) # guard precedes provider
                 if not positive:
@@ -412,7 +531,7 @@ class BootstrapTests(unittest.TestCase):
                     self.assertIn(['read',address,1,0x5a],machine.mmio)
 
     def test_irq_failure_has_no_following_operation(self):
-        for fault in ['irq-in-connect','irq-after-command','irq-during-allocation']:
+        for fault in ['irq-in-connect','irq-after-command','irq-during-allocation','irq-after-timer']:
             machine=self.check(fault,12)
             self.assertTrue(machine.injected)
             self.assertEqual(machine.mmio[-2:], [['write',0xfd000140,4,0],['read',0xfd000140,4,1]])
@@ -422,9 +541,87 @@ class BootstrapTests(unittest.TestCase):
                 self.assertEqual(machine.result()[7],1)
                 self.assertEqual(machine.kernel_calls[-1][0],'MmAllocateContiguousMemoryEx')
                 self.assertEqual(machine.pins,[])
-        machine=self.check('irq-pending',14,4,7)
+            if fault=='irq-after-timer':
+                self.assertFalse(any(x[0]=='write' and x[1] in [0xfd009210,0xfd009420] for x in machine.mmio))
+                self.assertIsNone(machine.instance)
+        machine=self.check('irq-pending',32,4,7)
         self.assertEqual(machine.result()[6],1)
         self.assertEqual(machine.result()[15],0) # real ready producer not reached
+
+    def test_documented_engine_enable_and_retained_state(self):
+        machine=self.check('engine-fifo-enabled',14,4,11)
+        self.assertEqual(machine.engine_changes,[dict(before=0xa5113101,requested=0xa5113101,changed=0)])
+        for fault in ['engine-graph-disabled','engine-timer-disabled','engine-fb-disabled','engine-crtc-disabled']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,32,0,0)
+                self.assertEqual(machine.mmio,[['read',0xfd000200,4,machine.engine_enable]])
+                self.assertEqual(machine.result()[22:24],[0,1])
+        for fault in ['engine-readback','engine-unknown-readback']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,12,4,7)
+                self.assertEqual(machine.mmio[-2][0:2],['write',0xfd000200])
+                self.assertEqual(machine.mmio[-1][0:2],['read',0xfd000200])
+                self.assertEqual(machine.result()[22:24],[1,1])
+        for fault in ['engine-drift','engine-pending','engine-fifo-pending']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,32,4,6)
+                self.assertFalse(machine.engine_written)
+                self.assertEqual(machine.result()[22:24],[0,0])
+        machine=self.check('engine-output-pending',32,4,7)
+        self.assertEqual(machine.mmio[-1],['read',0xfd002100,4,1])
+        self.assertFalse(any(x[0]=='write' and x[1]==0xfd000140 and x[3]==1 for x in machine.mmio))
+        for fault in ['pll-zero','pll-rate']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,30,4,8)
+                self.assertFalse(any(x[1]==0xfd009200 for x in machine.mmio))
+
+    def test_timer_producer_context_and_instance_owner(self):
+        self.check('wrong-frequency',6,0,0)
+        for fault in ['timer-zero-div','timer-invalid-ratio','timer-intermediate-ratio']:
+            with self.subTest(fault=fault):self.check(fault,33,4,8)
+        for fault,address,count in [('timer-div-readback',0xfd009200,9),
+                                     ('timer-upper-readback',0xfd009200,9),
+                                     ('timer-mul-readback',0xfd009210,10),
+                                     ('timer-alarm-readback',0xfd009420,11),
+                                     ('timer-alarm-low-readback',0xfd009420,11)]:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,12,4,count)
+                self.assertEqual(machine.mmio[-2][0:2],['write',address])
+                self.assertEqual(machine.mmio[-1][0:2],['read',address])
+                self.assertIsNone(machine.instance)
+        self.check('timer-drift',33,4,8)
+        self.check('timer-mask-drift',33,4,9) # Genuine DIV completion precedes context change
+        self.check('timer-status',33,4,11)
+        for fault in ['timer-stopped','timer-alarm-pending']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,14,4,11)
+                self.assertEqual(machine.timer.div&0xffff,56968)
+                self.assertEqual(machine.timer.mul&0xffff,7629)
+                self.assertEqual(machine.timer.alarm,0xffffffe0)
+                self.assertEqual(machine.timer.mask,0)
+                self.assertFalse(any(x[0]=='write' and x[1]==0xfd009100 for x in machine.mmio))
+                if fault=='timer-alarm-pending':self.assertEqual(machine.timer.pending,1)
+        self.check('framebuffer-config',30,4,11)
+        for fault in ['instance-failure','instance-padding','instance-protection','instance-post-pin']:
+            with self.subTest(fault=fault):
+                machine=self.check(fault,23,4,11)
+                self.assertFalse(any(x[1]>=0xfd700000 for x in machine.mmio))
+
+    def test_independent_timer_elapsed_alarm_and_passive_reads(self):
+        timer=Timer();timer.write(0xfd009200,56968);timer.write(0xfd009210,7629)
+        timer.write(0xfd009420,0xffffffff)
+        before=(timer.count,timer.elapsed,timer.pending)
+        for _ in range(100):
+            self.assertEqual(timer.read(0xfd009420),0xffffffe0)
+            timer.read(0xfd009400);timer.read(0xfd009100)
+        self.assertEqual((timer.count,timer.elapsed,timer.pending),before)
+        timer.advance(15000000)
+        expected=15000000*233333324*7629//(3375000*56968)
+        self.assertEqual(timer.count,expected)
+        self.assertGreater(expected,(1<<27)-1)
+        self.assertEqual(timer.pending,1);self.assertEqual(timer.mask,0)
+        timer.write(0xfd009100,0);self.assertEqual(timer.pending,1)
+        timer.write(0xfd009100,1);self.assertEqual(timer.pending,0)
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)

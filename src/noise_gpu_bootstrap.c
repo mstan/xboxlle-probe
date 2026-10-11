@@ -15,6 +15,15 @@ static int noise_active, noise_servicing, noise_dpc_ready;
 static uint64_t noise_frequency, noise_previous, noise_deadline;
 static int noise_instance_queried;
 static int noise_zero_owned;
+static int noise_timer_preparing;
+static unsigned noise_timer_stage;
+static uint32_t noise_timer_div,noise_timer_mul,noise_timer_pll;
+/* Existing framebuffer, timer, scanout and graphics ownership must be active.
+ * This diagnostic enables PFIFO without resetting any active engine. Unknown
+ * or variant-dependent enable fields retain their actual observed value.
+ */
+#define NOISE_EXISTING_ENGINES 0x01111000u
+#define NOISE_REQUIRED_ENGINES 0x00001100u
 extern int pb_init(void);
 extern int noise_pair_capture(void);
 extern void noise_sdk_service(void);
@@ -182,7 +191,8 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
      * PBUS aliases use aligned DWORD accesses, as required by primary BAR0 docs.
      * PCI command writes zero to STATUS; MISC preserves HEADER_TYPE/BIST.
      * ROM decode clears only ENABLE and must preserve its observed address.
-     * SDK engine/reset/clock/PIO/scanout effects require separate review.
+     * PMC_ENABLE admits only the documented PFIFO/PGRAPH OR policy below.
+     * SDK reset/clock/PIO/scanout effects require separate review.
      */
     uint32_t mask=0;
     if(bytes==4 && address==0xfd000140 && value<=1) mask=3;
@@ -190,9 +200,38 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     if(bytes==4 && address==0xfd001804 && !(value&0xffff0000u)) mask=0xffff;
     if(bytes==4 && address==0xfd001830 && !(value&1)) mask=0xffffffffu;
     if(bytes==4 && address==0xfd00180c && (value&0xffff)==0xf800) mask=0xffffffffu;
+    if(bytes==4 && address==0xfd000200) mask=0xffffffffu;
+    if(bytes==4 && noise_timer_preparing) {
+        if(address==0xfd009200 && !noise_timer_stage && (value&0xffff)==56968) mask=0xffff;
+        if(address==0xfd009210 && noise_timer_stage==1 && (value&0xffff)==7629) mask=0xffff;
+        if(address==0xfd009420 && noise_timer_stage==2 && value==0xffffffffu) mask=0xffffffe0u;
+    }
     if(!mask) noise_boot_abort(14);
     uint32_t flags=noise_cli();
     if(noise_gpu_bootstrap_result.status) { noise_flags(flags); noise_boot_abort(12); }
+    if(address==0xfd000200) {
+        uint32_t before=noise_raw_read((uint32_t)address);
+        if((before&NOISE_EXISTING_ENGINES)!=NOISE_EXISTING_ENGINES ||
+           value!=(before|NOISE_REQUIRED_ENGINES) ||
+           noise_raw_read(0xfd000140) || noise_raw_read(0xfd600140) ||
+           noise_raw_read(0xfd009140) || noise_raw_read(0xfd000100) ||
+           noise_raw_read(0xfd400700) || noise_raw_read(0xfd400108) ||
+           ((before&0x100) && noise_raw_read(0xfd002100)) ||
+           noise_raw_read((uint32_t)address)!=before) {
+            noise_flags(flags); noise_boot_abort(32);
+        }
+    }
+    if(address==0xfd009200 || address==0xfd009210 || address==0xfd009420) {
+        if(noise_raw_read(0xfd009140) || noise_raw_read(0xfd000140)!=1 ||
+           noise_raw_read(0xfd000100) ||
+           noise_raw_read(0xfd680500)!=noise_timer_pll ||
+           noise_raw_read(0xfd009200)!=noise_timer_div ||
+           noise_raw_read(0xfd009210)!=noise_timer_mul ||
+           (address==0xfd009200 && value!=((noise_timer_div&~0xffffu)|56968)) ||
+           (address==0xfd009210 && value!=((noise_timer_mul&~0xffffu)|7629))) {
+            noise_flags(flags); noise_boot_abort(33);
+        }
+    }
     if(address==0xfd001804 || address==0xfd001830 || address==0xfd00180c) {
         /* No relocation, W1C acknowledgement, or BIST/header change is allowed.
          * Check the current full value inside the same checked transaction.
@@ -216,8 +255,23 @@ static void noise_store_mmio(uintptr_t address,uint32_t value,unsigned bytes) {
     noise_gpu_bootstrap_result.observed=observed;
     noise_gpu_bootstrap_result.last_observed_valid=1;
     if((observed&mask)!=(value&mask)) noise_record_failure(12);
+    /* Unspecified ratio bits are preserved, never declared inert. */
+    if((address==0xfd009200 || address==0xfd009210) && observed!=value) noise_record_failure(12);
+    if(address==0xfd009420 && (observed&31)) noise_record_failure(12);
     noise_flags(flags);
     if(noise_gpu_bootstrap_result.status) noise_boot_abort(12);
+    if(address==0xfd009200) { noise_timer_div=observed; ++noise_timer_stage; }
+    if(address==0xfd009210) { noise_timer_mul=observed; ++noise_timer_stage; }
+    if(address==0xfd009420) ++noise_timer_stage;
+    if(address==0xfd000200) {
+        /* A successful enable is not a ready certificate or a completion.
+         * No pending source is acknowledged or hidden to advance startup.
+         */
+        if(noise_boot_load_i32((uint32_t *)0xfd000100) ||
+           noise_boot_load_i32((uint32_t *)0xfd400700) ||
+           noise_boot_load_i32((uint32_t *)0xfd400108) ||
+           noise_boot_load_i32((uint32_t *)0xfd002100)) noise_boot_abort(32);
+    }
 }
 #define INTEGER_ACCESS(T,N) \
 T noise_boot_load_##N(const T *p) { noise_boot_poll(); \
@@ -306,6 +360,35 @@ void noise_boot_pci_setup(void) {
     noise_boot_store_i32((uint32_t *)0xfd001830,rom&~1u);
     noise_boot_store_i32((uint32_t *)0xfd00180c,(misc&~0xffffu)|0xf800);
 }
+void noise_boot_engine_setup(void) {
+    uint32_t enabled=noise_boot_load_i32((uint32_t *)0xfd000200);
+    noise_boot_store_i32((uint32_t *)0xfd000200,enabled|NOISE_REQUIRED_ENGINES);
+}
+void noise_boot_timer_setup(void) {
+    if(noise_timer_preparing || noise_timer_stage || noise_frequency!=3375000u) noise_boot_abort(33);
+    noise_timer_pll=noise_boot_load_i32((uint32_t *)0xfd680500);
+    uint32_t m=noise_timer_pll&255,n=(noise_timer_pll>>8)&255,p=(noise_timer_pll>>16)&7;
+    if(!m || ((16666666u*n)/(1u<<p))/m!=233333324u) noise_boot_abort(33);
+    noise_timer_div=noise_boot_load_i32((uint32_t *)0xfd009200);
+    noise_timer_mul=noise_boot_load_i32((uint32_t *)0xfd009210);
+    uint32_t div=noise_timer_div&0xffff,mul=noise_timer_mul&0xffff;
+    /* Both the existing and intermediate ratio must be defined. Zero MUL is
+     * a stopped counter, allowed here; this command's ACPI deadline is separate.
+     */
+    if(!div || mul>div || mul>56968) noise_boot_abort(33);
+    noise_timer_preparing=1;
+    noise_boot_store_i32((uint32_t *)0xfd009200,(noise_timer_div&~0xffffu)|56968);
+    noise_boot_store_i32((uint32_t *)0xfd009210,(noise_timer_mul&~0xffffu)|7629);
+    noise_boot_store_i32((uint32_t *)0xfd009420,0xffffffffu);
+    uint32_t pending=noise_boot_load_i32((uint32_t *)0xfd009100);
+    if(pending&~1u) noise_boot_abort(33);
+    /* A real ALARM can be pending while masked; do not acknowledge it or
+     * manufacture ready/completion. PMC must still have no asserted source.
+     */
+    if(noise_boot_load_i32((uint32_t *)0xfd009140) ||
+       noise_boot_load_i32((uint32_t *)0xfd000100)) noise_boot_abort(33);
+    noise_timer_preparing=0;
+}
 void noise_boot_wbinvd(void) {
     noise_boot_poll();
     if(!noise_zero_owned) noise_boot_abort(22);
@@ -381,6 +464,12 @@ PVOID NTAPI noise_boot_instance(SIZE_T request,SIZE_T *padding) {
     if(physical!=start-0x80000000 || physical+0x5000>0x03ff0000) noise_boot_abort(23);
     MmLockUnlockBufferPages((void *)(uintptr_t)start,0x5000,FALSE);
     noise_check_sticky();
+    for(uint32_t offset=0;offset<0x5000;offset+=4096) {
+        void *page=(void *)(uintptr_t)(start+offset);
+        if(!noise_valid(page) || (noise_protect(page)&0xff)!=PAGE_READWRITE ||
+           noise_physical(page)!=physical+offset) noise_boot_abort(23);
+    }
+    if(noise_physical((void *)(uintptr_t)(address-1))!=physical+0x4fff) noise_boot_abort(23);
     /* CPU reservation provenance does not establish a physical PRAMIN alias.
      * All aperture writes stay guarded pending that independent owner proof.
      */
@@ -413,7 +502,10 @@ static void noise_verify_stack(void) {
 static void noise_preflight(void) {
     noise_frequency=KeQueryPerformanceFrequency();
     uint64_t first=KeQueryPerformanceCounter(),now=first;
-    if(noise_frequency<1000 || noise_frequency>1000000000u) noise_boot_abort(6);
+    /* Captured original kernel exports126/127 use board port8008, independent
+     * of PTIMER, and return exactly3375000Hz. No TSC or other-kernel inference.
+     */
+    if(noise_frequency!=3375000u) noise_boot_abort(6);
     for(unsigned i=0;i<4096 && now==first;++i) now=KeQueryPerformanceCounter();
     if(now<=first) noise_boot_abort(7);
     noise_previous=now; noise_deadline=now+noise_frequency*2;
@@ -425,6 +517,14 @@ static void noise_preflight(void) {
        noise_physical((void *)0x80000fff)!=0xfff ||
        (noise_protect((void *)0x80000000)&0xff)!=PAGE_READWRITE) noise_boot_abort(22);
     noise_zero_owned=1;
+    uint32_t enabled=noise_raw_read(0xfd000200);
+    if((enabled&NOISE_EXISTING_ENGINES)!=NOISE_EXISTING_ENGINES) {
+        noise_gpu_bootstrap_result.last_address=0xfd000200;
+        noise_gpu_bootstrap_result.requested=NOISE_EXISTING_ENGINES;
+        noise_gpu_bootstrap_result.observed=enabled;
+        noise_gpu_bootstrap_result.last_observed_valid=1;
+        noise_boot_abort(32);
+    }
     if(noise_raw_read(0xfd400700) || noise_raw_read(0xfd400108) || noise_raw_read(0xfd000100))
         noise_boot_abort(9);
 }
